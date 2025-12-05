@@ -10,25 +10,28 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 import time
 
 # --- КОНФИГУРАЦИЯ (ЧТЕНИЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ) ---
 
-# Получаем токен Telegram-бота
-BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") 
+# 1. Токен для Телеграм-бота (Пульт управления)
+BOT_TOKEN = os.environ.get("BOT_TOKEN") 
 if not BOT_TOKEN:
-    raise ValueError("Переменная TG_BOT_TOKEN не установлена!")
+    raise ValueError("Переменная BOT_TOKEN не установлена!")
 
-# Получаем ID администратора (для безопасности)
+# 2. ID администратора (для безопасности)
 try:
-    ADMIN_IDS = [int(os.environ.get("TG_ADMIN_ID"))] 
+    ADMIN_IDS = [int(os.environ.get("ADMIN_ID"))] 
 except (ValueError, TypeError):
-    # Если TG_ADMIN_ID не установлен или не является числом, берем 0, но выводим предупреждение
-    ADMIN_IDS = [0] 
-    logging.warning("Переменная TG_ADMIN_ID не установлена или некорректна. Ботом сможет управлять только пользователь с ID 0 (что невозможно).")
+    raise ValueError("Переменная ADMIN_ID не установлена или некорректна!")
 
+# 3. Ключи Telegram API (на будущее, если понадобится Userbot)
+API_ID = os.environ.get("API_ID") 
+API_HASH = os.environ.get("API_HASH") 
+# Примечание: В этом скрипте (для WhatsApp) эти переменные пока не используются,
+# но они необходимы для любой дальнейшей работы с Telegram API.
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(level=logging.INFO)
@@ -36,7 +39,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 driver = None
 
-# ... (Остальные функции Selenium start_chrome, quit_browser, check_login_status - остаются БЕЗ ИЗМЕНЕНИЙ) ...
+# --- ФУНКЦИИ SELENIUM (WHATSAPP) ---
 
 def start_chrome():
     """Запускает браузер Chrome в фоновом режиме."""
@@ -51,6 +54,7 @@ def start_chrome():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080") 
     
+    # Автоматически находит и устанавливает драйвер
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     return driver
@@ -62,10 +66,24 @@ def quit_browser():
         driver.quit()
         driver = None
 
+def check_login_status():
+    """Проверяет, вошли мы в аккаунт или нет (ищет список чатов)."""
+    global driver
+    if not driver:
+        return False
+    try:
+        # Ищем панель чатов (признак успешного входа)
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "pane-side"))
+        )
+        return True
+    except:
+        return False
+
+
 def get_link_code(phone_number):
     """
     Выполняет вход по номеру телефона и возвращает 8-значный код.
-    (Этот код остается сложным, так как имитирует действия человека)
     """
     global driver
     if not driver:
@@ -105,20 +123,18 @@ def get_link_code(phone_number):
         return code_element.text
         
     except TimeoutException:
-        print("Таймаут: Элементы не найдены. Возможно, уже авторизован.")
-        return "ERROR: Timeout"
+        return "ERROR: Timeout (Элемент не найден или страница не загрузилась)"
     except Exception as e:
-        print(f"Общая ошибка в процессе входа: {e}")
         return f"ERROR: General error: {e}"
 
-# --- ОБРАБОТЧИКИ TELEGRAM (Остаются БЕЗ ИЗМЕНЕНИЙ) ---
+# --- ОБРАБОТЧИКИ TELEGRAM ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     await message.answer(
-        "👋 Привет! Я твой пульт управления WhatsApp Userbot. Использую переменные окружения."
+        "👋 Привет! Я твой пульт управления WhatsApp Userbot. Все ключи взяты из переменных окружения."
     )
 
 @dp.message(Command("link"))
@@ -134,6 +150,7 @@ async def cmd_link(message: types.Message):
     phone_number = args[1].strip().replace('+', '')
     await message.answer(f"⏳ Начинаю вход по номеру: **{phone_number}**...")
     
+    # Запускаем блокирующую задачу в отдельном потоке
     result_code = await asyncio.to_thread(get_link_code, phone_number)
     
     if result_code and not result_code.startswith("ERROR"):
@@ -144,8 +161,6 @@ async def cmd_link(message: types.Message):
     else:
         await message.answer(f"❌ **Ошибка входа:** {result_code}")
 
-# ... (Остальные команды /screen, /status, /stop остаются без изменений) ...
-
 @dp.message(Command("screen"))
 async def cmd_screen(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -155,6 +170,7 @@ async def cmd_screen(message: types.Message):
         await message.answer("Браузер не запущен. Запустите его командой /link.")
         return
 
+    # Делаем скриншот
     screenshot = await asyncio.to_thread(driver.get_screenshot_as_png)
     photo_file = BufferedInputFile(screenshot, filename="debug_screen.png")
     await message.answer_photo(photo_file, caption="📸 Текущий экран браузера")
@@ -176,19 +192,6 @@ async def cmd_stop(message: types.Message):
         return
     quit_browser()
     await message.answer("🛑 Браузер закрыт.")
-    
-def check_login_status():
-    global driver
-    if not driver:
-        return False
-    try:
-        # Ищем панель чатов (признак успешного входа)
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.ID, "pane-side"))
-        )
-        return True
-    except:
-        return False
 
 
 # --- ЗАПУСК ---
