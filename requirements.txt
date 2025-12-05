@@ -1,4 +1,4 @@
-selenium==4.16.0 
-webdriver-manager 
-python-dotenv 
+aiogram==3.10.0
+selenium==4.23.0
+webdriver-manager
 Pillow
