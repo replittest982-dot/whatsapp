@@ -16,22 +16,19 @@ import time
 
 # --- КОНФИГУРАЦИЯ (ЧТЕНИЕ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ) ---
 
-# 1. Токен для Телеграм-бота (Пульт управления)
+# Убедитесь, что эти 4 переменные установлены на Bothost.ru
 BOT_TOKEN = os.environ.get("BOT_TOKEN") 
 if not BOT_TOKEN:
     raise ValueError("Переменная BOT_TOKEN не установлена!")
 
-# 2. ID администратора (для безопасности)
 try:
     ADMIN_IDS = [int(os.environ.get("ADMIN_ID"))] 
 except (ValueError, TypeError):
     raise ValueError("Переменная ADMIN_ID не установлена или некорректна!")
 
-# 3. Ключи Telegram API (на будущее, если понадобится Userbot)
+# Эти API ID/HASH не используются напрямую, но необходимы для полной конфигурации TG.
 API_ID = os.environ.get("API_ID") 
 API_HASH = os.environ.get("API_HASH") 
-# Примечание: В этом скрипте (для WhatsApp) эти переменные пока не используются,
-# но они необходимы для любой дальнейшей работы с Telegram API.
 
 # --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
 logging.basicConfig(level=logging.INFO)
@@ -48,7 +45,7 @@ def start_chrome():
         return driver
 
     options = Options()
-    options.add_argument("--headless") # Режим без окна (для сервера)
+    options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -134,7 +131,7 @@ async def cmd_start(message: types.Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     await message.answer(
-        "👋 Привет! Я твой пульт управления WhatsApp Userbot. Все ключи взяты из переменных окружения."
+        "👋 Привет! Я твой пульт управления WhatsApp Userbot. Используйте /link для входа."
     )
 
 @dp.message(Command("link"))
@@ -150,7 +147,6 @@ async def cmd_link(message: types.Message):
     phone_number = args[1].strip().replace('+', '')
     await message.answer(f"⏳ Начинаю вход по номеру: **{phone_number}**...")
     
-    # Запускаем блокирующую задачу в отдельном потоке
     result_code = await asyncio.to_thread(get_link_code, phone_number)
     
     if result_code and not result_code.startswith("ERROR"):
@@ -170,7 +166,6 @@ async def cmd_screen(message: types.Message):
         await message.answer("Браузер не запущен. Запустите его командой /link.")
         return
 
-    # Делаем скриншот
     screenshot = await asyncio.to_thread(driver.get_screenshot_as_png)
     photo_file = BufferedInputFile(screenshot, filename="debug_screen.png")
     await message.answer_photo(photo_file, caption="📸 Текущий экран браузера")
