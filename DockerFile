@@ -1,0 +1,38 @@
+# 1. Базовый образ: используем Python 3.11 Slim
+FROM python:3.11-slim
+
+# 2. Установка системных зависимостей для Chrome/Chromium
+# Устанавливаем необходимые библиотеки для работы браузера в Headless-режиме
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    libnss3 \
+    libgconf-2-4 \
+    libasound2 \
+    libfontconfig \
+    libgbm1 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. Установка Google Chrome Stable
+RUN wget -q -O - https://dl-ssl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
+    && apt-get update && apt-get install -y google-chrome-stable
+
+# 4. Создание рабочего каталога и установка Python-зависимостей
+WORKDIR /app
+
+# Копируем список Python-зависимостей и устанавливаем их
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 5. Определение переменных окружения для Selenium 
+ENV CHROME_EXECUTABLE_PATH /usr/bin/google-chrome
+
+# 6. Копирование основного кода Python
+# ВАЖНО: Ваш скрипт должен называться wa_final_bot.py
+COPY wa_final_bot.py /app/main.py
+
+# 7. Команда, которая запустится при старте контейнера
+CMD ["python", "main.py"]
