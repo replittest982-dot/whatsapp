@@ -2,7 +2,7 @@
 FROM python:3.11-slim
 
 # 2. Установка системных зависимостей для Chrome/Chromium
-# Устанавливаем необходимые библиотеки для работы браузера в Headless-режиме
+# Этот шаг устанавливает библиотеки, необходимые для запуска Chrome в Headless-режиме
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -17,22 +17,23 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 3. Установка Google Chrome Stable
-RUN wget -q -O - https://dl-ssl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
+# Добавляем репозиторий Google и устанавливаем стабильную версию Chrome
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
+    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
     && apt-get update && apt-get install -y google-chrome-stable
 
-# 4. Создание рабочего каталога и установка Python-зависимостей
+# 4. Создание рабочего каталога
 WORKDIR /app
 
-# Копируем список Python-зависимостей и устанавливаем их
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# 5. Установка Python-зависимостей (Ваши библиотеки)
+# В этом шаге мы добавляем сами библиотеки, которые Александр Волков спросил!
+RUN pip install --no-cache-dir aiogram==3.10.0 selenium==4.23.0 webdriver-manager Pillow
 
-# 5. Определение переменных окружения для Selenium 
+# 6. Определение переменных окружения для Selenium 
 ENV CHROME_EXECUTABLE_PATH /usr/bin/google-chrome
 
-# 6. Копирование основного кода Python
-# ВАЖНО: Ваш скрипт должен называться wa_final_bot.py
-COPY wa_final_bot.py /app/main.py
+# 7. Копирование основного кода Python (Предполагаем, что вы назвали его main.py)
+COPY main.py /app/main.py
 
-# 7. Команда, которая запустится при старте контейнера
+# 8. Команда, которая запустится при старте контейнера
 CMD ["python", "main.py"]
