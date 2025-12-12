@@ -1,42 +1,49 @@
-# 1. Базовый образ: используем Python 3.11 Slim
+# 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Установка системных зависимостей для Chrome/Headless-режима
-# Устанавливаем все, включая gnupg, dirmngr и apt-transport-https
+# 2. Сначала обновляем пакеты и ставим gnupg и wget (ОБЯЗАТЕЛЬНО ПЕРВЫМ ШАГОМ)
+# Это решает ошибку "apt-key not found" и проблемы с ключами
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
-    dirmngr \
-    apt-transport-https \
+    ca-certificates \
     libnss3 \
     libgconf-2-4 \
-    libasound2 \
     libfontconfig \
-    libgbm1 \
-    libatk-bridge2.0-0 \
-    libgtk-3-0 \
+    libx11-6 \
+    libxcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxss1 \
+    libxtst6 \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Установка Google Chrome Stable (КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ ОШИБКИ apt-key)
-# Новый метод добавления ключа: gpg --dearmor
-RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/trusted.gpg.d/google-archive.gpg \
-    && echo "deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/google-archive.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable
+# 3. Теперь добавляем ключи Chrome (НОВЫЙ МЕТОД, БЕЗ apt-key)
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
 
-# 4. Создание рабочего каталога
+# 4. Добавляем репозиторий
+RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
+
+# 5. Устанавливаем сам Chrome
+RUN apt-get update && apt-get install -y google-chrome-stable
+
+# 6. Настройка рабочей папки
 WORKDIR /app
 
-# 5. Установка Python-зависимостей (Библиотеки, которые вы запросили)
-# Устанавливаем все необходимые библиотеки в одном шаге
-RUN pip install --no-cache-dir aiogram==3.10.0 selenium==4.23.0 webdriver-manager Pillow
+# 7. Установка библиотек Python
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. Определение переменных окружения для Selenium 
-ENV CHROME_EXECUTABLE_PATH /usr/bin/google-chrome
+# 8. Копируем код
+COPY main.py .
 
-# 7. Копирование основного кода Python (Предполагаем, что вы назвали его main.py)
-COPY main.py /app/main.py
-
-# 8. Команда, которая запустится при старте контейнера
+# 9. Задаем переменную для Chrome и запускаем
+ENV CHROME_EXECUTABLE_PATH=/usr/bin/google-chrome
 CMD ["python", "main.py"]
