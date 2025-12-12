@@ -46,4 +46,4 @@ COPY main.py .
 
 # 9. Задаем переменную для Chrome и запускаем
 ENV CHROME_EXECUTABLE_PATH=/usr/bin/google-chrome
-CMD ["python", "main.py"]
+CMD ["python", "wa_final_bot.py"]
