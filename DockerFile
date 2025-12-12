@@ -1,8 +1,8 @@
 # 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Сначала обновляем пакеты и ставим gnupg и wget (ОБЯЗАТЕЛЬНО ПЕРВЫМ ШАГОМ)
-# Это решает ошибку "apt-key not found" и проблемы с ключами
+# 2. Устанавливаем wget, gnupg и системные библиотеки для Chrome
+# ВАЖНО: gnupg нужен для работы с ключами, без него ничего не выйдет
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -25,13 +25,13 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Теперь добавляем ключи Chrome (НОВЫЙ МЕТОД, БЕЗ apt-key)
+# 3. Скачиваем ключ Google и сохраняем его в специальный файл (БЕЗ apt-key!)
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
 
-# 4. Добавляем репозиторий
+# 4. Добавляем репозиторий Chrome, указывая путь к сохраненному ключу
 RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
 
-# 5. Устанавливаем сам Chrome
+# 5. Обновляем списки и ставим сам Chrome
 RUN apt-get update && apt-get install -y google-chrome-stable
 
 # 6. Настройка рабочей папки
@@ -41,7 +41,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 8. Копируем код
+# 8. Копируем код бота
 COPY main.py .
 
 # 9. Задаем переменную для Chrome и запускаем
