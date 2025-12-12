@@ -2,7 +2,6 @@
 FROM python:3.11-slim
 
 # 2. Установка системных зависимостей для Chrome/Headless-режима
-# Устанавливаем gnupg, dirmngr и библиотеки, необходимые для устранения ошибки 127
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -18,26 +17,28 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Установка Google Chrome Stable (ИСПРАВЛЕННЫЙ ШАГ)
-# Новый метод добавления ключа, который не использует устаревший 'apt-key'
+# 3. Установка Google Chrome Stable
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/trusted.gpg.d/google-archive.gpg \
     && echo "deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/google-archive.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable
 
-# 4. Создание рабочего каталога
-WORKDIR /app
+# --- ИСПРАВЛЕННЫЕ ШАГИ ДЛЯ PYTHON ЗАВИСИМОСТЕЙ ---
 
-# 5. Установка Python-зависимостей (Ваши библиотеки)
-# Устанавливаем все необходимые библиотеки в одном шаге
+# 4. Создание рабочего каталога и копирование файлов
+WORKDIR /app
+# Копируем список Python-зависимостей и основной файл
 COPY requirements.txt /app/
+COPY main.py /app/
+
+# 5. Установка Python-зависимостей
+# Используем -r requirements.txt для установки всех библиотек
 RUN pip install --no-cache-dir -r requirements.txt
+
+# --- КОНЕЦ ИСПРАВЛЕНИЙ ---
 
 # 6. Определение переменных окружения для Selenium 
 ENV CHROME_EXECUTABLE_PATH /usr/bin/google-chrome
 
-# 7. Копирование основного кода Python (Предполагаем, что вы назвали его main.py)
-COPY main.py /app/main.py
-
-# 8. Команда, которая запустится при старте контейнера
+# 7. Команда, которая запустится при старте контейнера
 CMD ["python", "main.py"]
