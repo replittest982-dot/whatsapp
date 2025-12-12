@@ -1,14 +1,13 @@
 # 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Устанавливаем wget, gnupg и системные библиотеки для Chrome
-# ВАЖНО: gnupg нужен для работы с ключами, без него ничего не выйдет
+# 2. Устанавливаем wget, gnupg и системные библиотеки
+# ВАЖНО: Я УДАЛИЛ libgconf-2-4, как просил Александр
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
     ca-certificates \
     libnss3 \
-    libgconf-2-4 \
     libfontconfig \
     libx11-6 \
     libxcb1 \
@@ -25,13 +24,13 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Скачиваем ключ Google и сохраняем его в специальный файл (БЕЗ apt-key!)
+# 3. Скачиваем ключ Google (Современный метод, без apt-key)
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
 
-# 4. Добавляем репозиторий Chrome, указывая путь к сохраненному ключу
+# 4. Добавляем репозиторий Chrome
 RUN echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list
 
-# 5. Обновляем списки и ставим сам Chrome
+# 5. Устанавливаем сам Chrome
 RUN apt-get update && apt-get install -y google-chrome-stable
 
 # 6. Настройка рабочей папки
