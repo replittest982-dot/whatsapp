@@ -1,11 +1,13 @@
 # 1. Базовый образ: используем Python 3.11 Slim
 FROM python:3.11-slim
 
-# 2. Установка системных зависимостей для Chrome/Chromium
-# Этот шаг устанавливает библиотеки, необходимые для запуска Chrome в Headless-режиме
+# 2. Установка системных зависимостей для Chrome/Headless-режима
+# Устанавливаем gnupg, dirmngr и библиотеки, необходимые для устранения ошибки 127
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
+    dirmngr \
+    apt-transport-https \
     libnss3 \
     libgconf-2-4 \
     libasound2 \
@@ -16,18 +18,20 @@ RUN apt-get update && apt-get install -y \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. Установка Google Chrome Stable
-# Добавляем репозиторий Google и устанавливаем стабильную версию Chrome
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list' \
-    && apt-get update && apt-get install -y google-chrome-stable
+# 3. Установка Google Chrome Stable (ИСПРАВЛЕННЫЙ ШАГ)
+# Новый метод добавления ключа, который не использует устаревший 'apt-key'
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /etc/apt/trusted.gpg.d/google-archive.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/trusted.gpg.d/google-archive.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
+    && apt-get update \
+    && apt-get install -y google-chrome-stable
 
 # 4. Создание рабочего каталога
 WORKDIR /app
 
 # 5. Установка Python-зависимостей (Ваши библиотеки)
-# В этом шаге мы добавляем сами библиотеки, которые Александр Волков спросил!
-RUN pip install --no-cache-dir aiogram==3.10.0 selenium==4.23.0 webdriver-manager Pillow
+# Устанавливаем все необходимые библиотеки в одном шаге
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 6. Определение переменных окружения для Selenium 
 ENV CHROME_EXECUTABLE_PATH /usr/bin/google-chrome
