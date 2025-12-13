@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 import sqlite3
+import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -10,14 +11,13 @@ from aiogram.types import (
     InlineKeyboardMarkup, 
     InlineKeyboardButton,
     ReplyKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardRemove
+    KeyboardButton
 )
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# --- SELENIUM IMPORTS ---
+# --- SELENIUM & DRIVER ---
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -30,369 +30,273 @@ import time
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = os.environ.get("ADMIN_ID") # Ваш ID для админки
+ADMIN_ID = os.environ.get("ADMIN_ID")
 
-# --- СИСТЕМА ОЧЕРЕДЕЙ (Anti-Crash) ---
-# Selenium тяжелый. Ограничиваем одновременный запуск браузеров до 1.
-# Остальные пользователи будут ждать в очереди.
+# Очередь (чтобы сервер не упал от нагрузок)
 BROWSER_SEMAPHORE = asyncio.Semaphore(1) 
-
-# --- НАСТРОЙКА БД (SQLite) ---
 DB_NAME = 'bot_database.db'
 
+# --- БАЗА ДАННЫХ ---
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
-        # Таблица пользователей
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                full_name TEXT,
-                reg_date TEXT
-            )
-        ''')
-        # Таблица аккаунтов
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS accounts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                phone_number TEXT,
-                status TEXT DEFAULT 'active',
-                added_date TEXT
-            )
-        ''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, reg_date TEXT)''')
+        cur.execute('''CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, phone_number TEXT, added_date TEXT)''')
         conn.commit()
-
-def db_register_user(user: types.User):
-    with sqlite3.connect(DB_NAME) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT user_id FROM users WHERE user_id = ?", (user.id,))
-        if not cur.fetchone():
-            date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cur.execute(
-                "INSERT INTO users (user_id, username, full_name, reg_date) VALUES (?, ?, ?, ?)",
-                (user.id, user.username, user.full_name, date_now)
-            )
-            return True
-    return False
 
 def db_add_account(user_id, phone):
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT * FROM accounts WHERE user_id = ? AND phone_number = ?", (user_id, phone))
-        if not cur.fetchone():
-            date_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cur.execute("INSERT INTO accounts (user_id, phone_number, added_date) VALUES (?, ?, ?)", (user_id, phone, date_now))
+        if not cur.execute("SELECT * FROM accounts WHERE user_id = ? AND phone_number = ?", (user_id, phone)).fetchone():
+            cur.execute("INSERT INTO accounts (user_id, phone_number, added_date) VALUES (?, ?, ?)", 
+                        (user_id, phone, datetime.now().strftime("%Y-%m-%d %H:%M")))
             return True
     return False
 
 def db_get_accounts(user_id):
     with sqlite3.connect(DB_NAME) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, phone_number, status FROM accounts WHERE user_id = ?", (user_id,))
-        return cur.fetchall()
+        return conn.execute("SELECT id, phone_number FROM accounts WHERE user_id = ?", (user_id,)).fetchall()
 
-def db_delete_account(acc_id, user_id):
+def db_delete_account(acc_id):
     with sqlite3.connect(DB_NAME) as conn:
-        cur = conn.cursor()
-        cur.execute("DELETE FROM accounts WHERE id = ? AND user_id = ?", (acc_id, user_id))
-        conn.commit()
+        conn.execute("DELETE FROM accounts WHERE id = ?", (acc_id,))
 
-def db_get_stats():
-    with sqlite3.connect(DB_NAME) as conn:
-        cur = conn.cursor()
-        users_count = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        accs_count = cur.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]
-        return users_count, accs_count
-
-# --- НАСТРОЙКА БОТА ---
+# --- БОТ И FSM ---
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 driver = None
 
-# Состояния FSM
 class Form(StatesGroup):
     waiting_for_phone = State()
 
-# --- ФУНКЦИИ SELENIUM (Advanced) ---
-def get_driver():
-    """Создает и настраивает драйвер. Использует один глобальный инстанс."""
-    global driver
-    if driver is not None:
-        try:
-            # Проверка жив ли драйвер
-            driver.title 
-            return driver
-        except WebDriverException:
-            driver = None
+# --- УТИЛИТЫ ---
+def clean_phone_number(raw_phone):
+    """Умная очистка номера: убирает скобки, плюсы, пробелы. меняет 8 на 7."""
+    # Оставляем только цифры
+    digits = re.sub(r'\D', '', raw_phone)
+    if not digits: return None
+    
+    # Если начинается с 8 и длина 11, меняем на 7
+    if len(digits) == 11 and digits.startswith('8'):
+        digits = '7' + digits[1:]
+    # Если длина 10 (без кода страны), добавляем 7
+    elif len(digits) == 10:
+        digits = '7' + digits
+        
+    return digits
 
+# --- SELENIUM LOGIC ---
+def get_driver():
+    global driver
+    if driver:
+        try:
+            driver.title
+            return driver
+        except:
+            driver = None
+            
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--remote-debugging-port=9222")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
     
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     return driver
 
-def logic_get_whatsapp_code(phone_number):
-    """
-    Сложная логика получения кода с обработкой ошибок.
-    """
+def selenium_login_flow(phone_number, status_callback=None):
+    """Возвращает: {'status': 'ok/error', 'data': 'code/error_msg'}"""
     wd = get_driver()
     try:
         wd.get("https://web.whatsapp.com/")
-        wait = WebDriverWait(wd, 40) # 40 сек на загрузку страницы
-
-        # 1. Поиск кнопки (с попытками)
+        wait = WebDriverWait(wd, 30)
+        
+        # Клик по "Link with phone number"
         try:
-            link_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]")))
-            link_btn.click()
-        except TimeoutException:
-            # Возможно, мы уже на странице ввода
-            pass
-
-        time.sleep(2) # Небольшая пауза для анимации
-
-        # 2. Ввод номера
-        phone_input = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@aria-label='Type your phone number.'] | //input[@type='text']")))
-        phone_input.clear()
-        for char in phone_number:
-            phone_input.send_keys(char)
-            time.sleep(0.05) # Имитация человека
+            btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]")))
+            btn.click()
+        except: pass 
         
-        # 3. Нажать Next
-        next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
-        next_btn.click()
+        time.sleep(1)
         
-        # 4. Получение кода
-        code_element = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@aria-details='link-device-phone-number-code']")))
-        return {"status": "success", "code": code_element.text}
-
-    except TimeoutException:
-        return {"status": "error", "msg": "Превышено время ожидания. WhatsApp долго грузится."}
+        # Ввод номера
+        inp = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@aria-label='Type your phone number.'] | //input[@type='text']")))
+        inp.clear()
+        for ch in phone_number:
+            inp.send_keys(ch)
+            time.sleep(0.05)
+            
+        wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']"))).click()
+        
+        # Получение кода
+        code_el = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@aria-details='link-device-phone-number-code']")))
+        return {"status": "ok", "data": code_el.text}
+        
     except Exception as e:
-        return {"status": "error", "msg": f"Внутренняя ошибка: {str(e)}"}
+        return {"status": "error", "data": str(e)}
 
-# --- КЛАВИАТУРЫ (UI) ---
+# --- UI (КЛАВИАТУРЫ) ---
+def kb_main():
+    # Главное меню (ВНИЗУ) - Как в Monkey Bot
+    return ReplyKeyboardMarkup(keyboard=[
+        [KeyboardButton(text="➕ Добавить аккаунт"), KeyboardButton(text="📂 Мои номера")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="⚙️ Настройки")]
+    ], resize_keyboard=True)
 
-def kb_main_menu():
-    """Главное меню (Reply) - как в Monkey Bot"""
-    kb = [
-        [KeyboardButton(text="➕ Добавить"), KeyboardButton(text="📞 Мои аккаунты")],
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="ℹ️ Информация")],
-        [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="📩 Поддержка")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+def kb_cancel():
+    # Инлайн кнопка отмены
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_action")]])
 
-def kb_inline_back():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="delete_msg")]])
-
-def kb_my_accounts(accounts):
-    """Список аккаунтов с управлением"""
+def kb_accounts_list(accounts):
     kb = []
     for acc in accounts:
-        # acc = (id, phone, status)
-        status_icon = "🟢" if acc[2] == 'active' else "🔴"
-        btn_text = f"{status_icon} {acc[1]}"
-        # При нажатии можно показать меню управления конкретным аккаунтом
-        kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"manage_{acc[0]}")])
-    
-    kb.append([InlineKeyboardButton(text="➕ Добавить новый", callback_data="start_add_process")])
+        # acc: (id, phone)
+        kb.append([InlineKeyboardButton(text=f"📱 +{acc[1]}", callback_data=f"manage_{acc[0]}")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-def kb_account_manage(acc_id):
+def kb_manage(acc_id):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_acc_{acc_id}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_list")]
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{acc_id}")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_list")]
     ])
 
-# --- ОБРАБОТЧИКИ (HANDLERS) ---
+# --- HANDLERS ---
 
-@dp.message(Command("start"), StateFilter(None))
-async def cmd_start(message: types.Message, state: FSMContext):
+@dp.message(Command("start"))
+async def start(message: types.Message, state: FSMContext):
     await state.clear()
-    # Регистрируем пользователя в БД
-    is_new = db_register_user(message.from_user)
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute("INSERT OR IGNORE INTO users (user_id, username, reg_date) VALUES (?, ?, ?)", 
+                     (message.from_user.id, message.from_user.username, datetime.now().strftime("%Y-%m-%d")))
     
-    users_total, _ = db_get_stats()
-    welcome_text = (
+    await message.answer(
         f"👋 **Привет, {message.from_user.first_name}!**\n\n"
-        "🤖 Я — продвинутый бот для управления WhatsApp аккаунтами.\n"
-        "Мои возможности:\n"
-        "• Быстрый вход по коду\n"
-        "• QR-код (скриншот)\n"
-        "• Управление базой номеров\n\n"
-        f"👥 Нас уже: **{users_total} пользователей**\n"
-        "👇 Выберите действие в меню:"
+        "Я бот для управления WhatsApp аккаунтами.\n"
+        "Жми кнопку внизу, чтобы добавить номер.",
+        reply_markup=kb_main(),
+        parse_mode="Markdown"
     )
-    await message.answer(welcome_text, reply_markup=kb_main_menu(), parse_mode="Markdown")
 
-# --- СЕКЦИЯ: ПРОФИЛЬ ---
-@dp.message(F.text == "👤 Профиль")
-async def handle_profile(message: types.Message):
-    accounts = db_get_accounts(message.from_user.id)
-    reg_date = "Неизвестно" # В реальном проекте берем из БД
-    
-    text = (
-        f"👤 **Профиль пользователя**\n"
-        f"➖➖➖➖➖➖➖➖➖➖\n"
-        f"🆔 ID: `{message.from_user.id}`\n"
-        f"👤 Имя: {message.from_user.full_name}\n"
-        f"📱 Аккаунтов: **{len(accounts)}**\n"
-        f"➖➖➖➖➖➖➖➖➖➖"
-    )
-    await message.answer(text, reply_markup=kb_inline_back(), parse_mode="Markdown")
-
-# --- СЕКЦИЯ: МОИ АККАУНТЫ ---
-@dp.message(F.text == "📞 Мои аккаунты")
-async def handle_my_accounts(message: types.Message):
-    accounts = db_get_accounts(message.from_user.id)
-    if not accounts:
-        text = "📭 **У вас нет добавленных аккаунтов.**\nНажмите «Добавить», чтобы подключить."
-        await message.answer(text, reply_markup=kb_inline_back(), parse_mode="Markdown")
-    else:
-        text = f"📂 **Ваши аккаунты ({len(accounts)}):**\nНажмите на аккаунт для управления."
-        await message.answer(text, reply_markup=kb_my_accounts(accounts), parse_mode="Markdown")
-
-# Управление аккаунтом (Inline)
-@dp.callback_query(F.data.startswith("manage_"))
-async def cb_manage_acc(callback: types.CallbackQuery):
-    acc_id = callback.data.split("_")[1]
-    await callback.message.edit_text(f"⚙️ Управление аккаунтом #{acc_id}", reply_markup=kb_account_manage(acc_id))
-
-@dp.callback_query(F.data == "back_to_list")
-async def cb_back_list(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await handle_my_accounts(callback.message)
-
-@dp.callback_query(F.data.startswith("del_acc_"))
-async def cb_del_acc(callback: types.CallbackQuery):
-    acc_id = callback.data.split("_")[2]
-    db_delete_account(acc_id, callback.from_user.id)
-    await callback.answer("✅ Аккаунт удален из базы", show_alert=True)
-    await cb_back_list(callback)
-
-# --- СЕКЦИЯ: ДОБАВЛЕНИЕ АККАУНТА (СЛОЖНАЯ ЛОГИКА) ---
-
-@dp.message(F.text == "➕ Добавить")
-@dp.callback_query(F.data == "start_add_process")
-async def start_add(event: types.Message | types.CallbackQuery, state: FSMContext):
-    msg_func = event.answer if isinstance(event, types.Message) else event.message.answer
-    
-    # Проверка очереди (Semaphore)
+# --- ДОБАВЛЕНИЕ АККАУНТА (СМАРТ ЛОГИКА) ---
+@dp.message(F.text == "➕ Добавить аккаунт")
+async def add_acc_start(message: types.Message, state: FSMContext):
     if BROWSER_SEMAPHORE.locked():
-        await msg_func("⚠️ **Сервер сейчас нагружен.**\nПожалуйста, подождите 10-20 секунд и попробуйте снова.", parse_mode="Markdown")
+        await message.answer("⚠️ Очередь занята, подождите 10 сек...", reply_markup=kb_main())
         return
 
-    text = (
-        "🚀 **Добавление нового аккаунта**\n\n"
-        "Введите номер телефона, который привязан к WhatsApp.\n"
-        "Формат: `79991234567` (только цифры)\n\n"
-        "⚠️ *Держите телефон под рукой, нужно будет ввести код.*"
+    await message.answer(
+        "📞 **Отправьте номер телефона**\n\n"
+        "Можно в любом формате:\n"
+        "• `+7 999 123 45 67`\n"
+        "• `89991234567`\n"
+        "• `9991234567`",
+        reply_markup=kb_cancel(),
+        parse_mode="Markdown"
     )
-    if isinstance(event, types.CallbackQuery):
-        await event.message.answer(text, parse_mode="Markdown")
-        await event.answer()
-    else:
-        await event.answer(text, parse_mode="Markdown")
-        
     await state.set_state(Form.waiting_for_phone)
 
 @dp.message(Form.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.text.strip().replace('+', '').replace(' ', '').replace('-', '')
+    raw_phone = message.text
+    phone = clean_phone_number(raw_phone)
     
-    if not phone.isdigit() or len(phone) < 7:
-        await message.answer("❌ **Ошибка формата!**\nВведите только цифры. Пример: `79051234567`")
+    if not phone or len(phone) < 10:
+        await message.answer("❌ **Неверный формат номера!**\nПопробуйте еще раз или нажмите отмену.", reply_markup=kb_cancel(), parse_mode="Markdown")
         return
 
-    status_msg = await message.answer(f"⏳ **Встаю в очередь...**\nНомер: `{phone}`", parse_mode="Markdown")
-
-    # Использование Семафора (Очередь)
+    # Живое обновление статуса
+    status_msg = await message.answer(f"⏳ **Обработка номера: +{phone}**\n🔄 Запускаю безопасный браузер...", parse_mode="Markdown")
+    
     async with BROWSER_SEMAPHORE:
-        await status_msg.edit_text(f"🔄 **Запускаю браузер...**\nПожалуйста, не закрывайте диалог.")
-        
-        # Запускаем тяжелую задачу в отдельном потоке
-        result = await asyncio.to_thread(logic_get_whatsapp_code, phone)
+        await status_msg.edit_text(f"⏳ **Обработка номера: +{phone}**\n🔄 Ввожу данные в WhatsApp...", parse_mode="Markdown")
+        result = await asyncio.to_thread(selenium_login_flow, phone)
 
-    if result["status"] == "success":
-        # Сохраняем в БД
+    if result['status'] == 'ok':
         db_add_account(message.from_user.id, phone)
+        code = result['data']
         
-        # Кнопка для QR
-        kb_qr = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📷 Показать QR код", callback_data="req_qr")],
-            [InlineKeyboardButton(text="✅ Я ввел код", callback_data="delete_msg")]
+        kb_result = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📷 Показать QR (если код не сработал)", callback_data="get_qr")],
+            [InlineKeyboardButton(text="✅ Готово", callback_data="cancel_action")]
         ])
-
+        
         await status_msg.delete()
         await message.answer(
-            f"✅ **Успешно! Ваш код:**\n\n"
-            f"`{result['code']}`\n\n"
-            "1️⃣ Зайдите в WhatsApp -> Настройки -> Связанные устройства.\n"
-            "2️⃣ Нажмите «Привязка по номеру».\n"
-            "3️⃣ Введите этот код.",
-            reply_markup=kb_qr,
+            f"✅ **КОД ДЛЯ ВХОДА:**\n\n`{code}`\n\n"
+            f"Вводите этот код в WhatsApp на телефоне.\nНомер: `+{phone}`",
+            reply_markup=kb_result,
             parse_mode="Markdown"
         )
     else:
-        await status_msg.edit_text(f"❌ **Ошибка:** {result['msg']}\nПопробуйте позже.")
+        await status_msg.edit_text(f"❌ **Ошибка WhatsApp:**\n{result['data']}", reply_markup=kb_main())
     
     await state.clear()
 
-# --- ФУНКЦИЯ QR КОДА ---
-@dp.callback_query(F.data == "req_qr")
-async def cb_show_qr(callback: types.CallbackQuery):
+# --- ПРОФИЛЬ И СПИСКИ ---
+@dp.message(F.text == "📂 Мои номера")
+async def show_numbers(message: types.Message):
+    accs = db_get_accounts(message.from_user.id)
+    if not accs:
+        await message.answer("📭 Список пуст.", reply_markup=kb_main())
+    else:
+        await message.answer(f"📱 **Ваши номера ({len(accs)}):**", reply_markup=kb_accounts_list(accs), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("manage_"))
+async def manage_acc(call: types.CallbackQuery):
+    acc_id = call.data.split("_")[1]
+    await call.message.edit_text("⚙️ **Управление аккаунтом:**", reply_markup=kb_manage(acc_id), parse_mode="Markdown")
+
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_acc(call: types.CallbackQuery):
+    acc_id = call.data.split("_")[1]
+    db_delete_account(acc_id)
+    await call.answer("🗑 Номер удален!")
+    await call.message.edit_text("✅ Удалено.", reply_markup=None)
+
+@dp.callback_query(F.data == "back_list")
+async def back_to_list(call: types.CallbackQuery):
+    await call.message.delete()
+    await show_numbers(call.message)
+
+@dp.callback_query(F.data == "cancel_action")
+async def cancel_action(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.delete()
+    await call.answer("Отменено")
+
+# --- QR КОД ---
+@dp.callback_query(F.data == "get_qr")
+async def send_qr(call: types.CallbackQuery):
     global driver
     if not driver:
-        await callback.answer("Сессия истекла. Попробуйте заново.", show_alert=True)
+        await call.answer("Время сессии истекло, начните заново.", show_alert=True)
         return
-
-    await callback.answer("📸 Делаю скриншот...")
+    
+    await call.answer("📸 Делаю скрин...")
     try:
-        # Делаем скриншот в отдельном потоке, чтобы не блочить бота
-        screenshot = await asyncio.to_thread(driver.get_screenshot_as_png)
-        photo = BufferedInputFile(screenshot, filename="qrcode.png")
-        await callback.message.answer_photo(photo, caption="📷 **Текущий экран:**\nСканируйте QR, если код не сработал.", parse_mode="Markdown")
-    except Exception as e:
-        await callback.message.answer(f"Не удалось сделать скриншот: {e}")
+        screen = await asyncio.to_thread(driver.get_screenshot_as_png)
+        await call.message.answer_photo(BufferedInputFile(screen, "qr.png"), caption="Сканируйте QR, если нужно.")
+    except:
+        await call.answer("Ошибка скриншота", show_alert=True)
 
-@dp.callback_query(F.data == "delete_msg")
-async def cb_delete(callback: types.CallbackQuery):
-    await callback.message.delete()
-
-# --- АДМИН ПАНЕЛЬ ---
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    # Простейшая защита по ID (если переменная задана)
-    if ADMIN_ID and str(message.from_user.id) != str(ADMIN_ID):
-        return
-
-    u_count, a_count = db_get_stats()
+# --- ПРОФИЛЬ (Заглушка для красоты) ---
+@dp.message(F.text == "👤 Профиль")
+async def profile(message: types.Message):
+    accs_count = len(db_get_accounts(message.from_user.id))
     text = (
-        "🕵️‍♂️ **Админ-панель**\n\n"
-        f"👥 Пользователей: `{u_count}`\n"
-        f"📱 Аккаунтов: `{a_count}`\n"
-        f"⚙️ Сервер: Работает"
+        f"👤 **Ваш Профиль**\n"
+        f"🆔 ID: `{message.from_user.id}`\n"
+        f"📱 Подключено номеров: **{accs_count}**"
     )
-    await message.answer(text, parse_mode="Markdown")
-
-# --- ОБРАБОТЧИКИ ЗАГЛУШЕК ---
-@dp.message(F.text.in_({"ℹ️ Информация", "⚙️ Настройки", "📩 Поддержка"}))
-async def handle_stub(message: types.Message):
-    await message.answer("🛠 Этот раздел находится в разработке.", reply_markup=kb_inline_back())
+    await message.answer(text, reply_markup=kb_main(), parse_mode="Markdown")
 
 # --- ЗАПУСК ---
 async def main():
-    init_db() # Инициализация БД
-    print("✅ Бот запущен и готов к работе (v2.0 PRO)")
+    init_db()
+    print("✅ БОТ ЗАПУЩЕН (MODE: ULTRA INLINE)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
@@ -400,5 +304,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         if driver: driver.quit()
-    except Exception as e:
-        logging.error(f"Critical: {e}")
