@@ -18,14 +18,16 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
 import time
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-# Разрешаем 1 поток браузера (безопасно)
 BROWSER_SEMAPHORE = asyncio.Semaphore(1) 
 DB_NAME = 'bot_database.db'
+
+# ГЛОБАЛЬНЫЙ СЛОВАРЬ ДЛЯ КНОПКИ "ЧЕК"
+# user_id -> driver_instance
+ACTIVE_DRIVERS = {}
 
 # --- БАЗА ДАННЫХ ---
 def init_db():
@@ -58,52 +60,45 @@ class Form(StatesGroup):
 
 # --- ЛОГИКА БРАУЗЕРА ---
 def get_driver():
-    """Конфигурация Chrome для PRO-тарифа (2GB RAM)"""
     options = Options()
-    
-    # == ОБЯЗАТЕЛЬНЫЕ ФЛАГИ ДЛЯ DOCKER ==
+    # Флаги стабильности
     options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox") 
+    options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage") 
     options.add_argument("--disable-gpu")
-    
-    # Стандартный размер окна
-    options.add_argument("--window-size=1920,1080")
-    
-    # Отключаем уведомления и инфобары
-    options.add_argument("--disable-notifications")
-    options.add_argument("--disable-infobars")
-    
-    # User Agent (как обычный ПК)
+    options.add_argument("--disable-setuid-sandbox") # Важно!
+    options.add_argument("--window-size=1280,720")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
+    # ПРЯМОЙ ПУТЬ К ДРАЙВЕРУ (из Dockerfile)
+    service = Service(executable_path="/usr/local/bin/chromedriver")
+    
     try:
-        service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         return driver
     except Exception as e:
         logging.error(f"❌ Driver Init Error: {e}")
         raise e
 
-def run_auth_process(phone_number):
+def run_auth_process(user_id, phone_number):
     driver = None
     try:
         driver = get_driver()
-        driver.set_page_load_timeout(60) # 60 сек на загрузку
+        # Регистрируем драйвер для кнопки ЧЕК
+        ACTIVE_DRIVERS[user_id] = driver
         
-        # Переход на сайт
+        driver.set_page_load_timeout(60)
         driver.get("https://web.whatsapp.com/")
-        wait = WebDriverWait(driver, 45)
+        wait = WebDriverWait(driver, 60) # Ждем прогрузки QR/кода
 
-        # 1. Жмем "Link with phone number" (если есть)
+        # 1. Жмем Link with phone number
         try:
             btn_xpath = "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]"
             btn = wait.until(EC.presence_of_element_located((By.XPATH, btn_xpath)))
             driver.execute_script("arguments[0].click();", btn)
-        except Exception: 
-            pass 
+        except: pass 
 
-        # 2. Вводим номер
+        # 2. Ввод номера
         time.sleep(2)
         inp = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@aria-label='Type your phone number.'] | //input[@type='text']")))
         inp.clear()
@@ -111,30 +106,30 @@ def run_auth_process(phone_number):
             inp.send_keys(ch)
             time.sleep(0.05)
         
-        # 3. Жмем Next
+        # 3. Next
         next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
         driver.execute_script("arguments[0].click();", next_btn)
 
-        # 4. Ждем Код (или скриншот ошибки)
+        # 4. Ждем код
         try:
             code_el = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@aria-details='link-device-phone-number-code']")))
-            time.sleep(1) 
+            time.sleep(1)
             return {"status": "ok", "type": "code", "data": code_el.text}
-        except Exception:
-            # Делаем скриншот, если кода нет
+        except:
             screenshot = driver.get_screenshot_as_png()
             return {"status": "ok", "type": "screenshot", "data": screenshot}
 
     except Exception as e:
         return {"status": "error", "data": str(e)}
     finally:
+        # Убираем из активных и закрываем
+        if user_id in ACTIVE_DRIVERS:
+            del ACTIVE_DRIVERS[user_id]
         if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+            try: driver.quit()
+            except: pass
 
-# --- КЛАВИАТУРЫ ---
+# --- UI ---
 def kb_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_acc")],
@@ -144,6 +139,12 @@ def kb_menu():
 
 def kb_back():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]])
+
+def kb_process():
+    # Кнопка ЧЕК для проверки браузера
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 ЧЕК (Скриншот)", callback_data="check_browser")]
+    ])
 
 def kb_acc_list(accounts):
     kb = []
@@ -158,87 +159,105 @@ def kb_manage(acc_id):
         [InlineKeyboardButton(text="🔙 К списку", callback_data="list_acc")]
     ])
 
-# --- ХЕНДЛЕРЫ ---
+# --- HANDLERS ---
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
+async def start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 **WhatsApp Manager**", reply_markup=kb_menu(), parse_mode="Markdown")
+    await msg.answer("👋 **WhatsApp Manager**", reply_markup=kb_menu(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "main_menu")
-async def cb_menu(call: types.CallbackQuery, state: FSMContext):
+async def menu(call: types.CallbackQuery, state: FSMContext):
     await state.clear()
-    try:
-        await call.message.edit_text("👋 **Главное меню**", reply_markup=kb_menu(), parse_mode="Markdown")
-    except:
-        await call.message.answer("👋 **Главное меню**", reply_markup=kb_menu(), parse_mode="Markdown")
+    await call.message.delete()
+    await call.message.answer("👋 **Главное меню**", reply_markup=kb_menu(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "add_acc")
-async def cb_add(call: types.CallbackQuery, state: FSMContext):
+async def add(call: types.CallbackQuery, state: FSMContext):
     if BROWSER_SEMAPHORE.locked():
-        await call.answer("⚠️ Очередь занята. Ждите...", show_alert=True)
+        await call.answer("⚠️ Очередь занята!", show_alert=True)
         return
     await call.message.edit_text("📞 **Введите номер** (7999...)", reply_markup=kb_back(), parse_mode="Markdown")
     await state.set_state(Form.wait_phone)
 
-@dp.message(Form.wait_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    phone = re.sub(r'\D', '', message.text)
-    if len(phone) == 11 and phone.startswith('8'): phone = '7' + phone[1:]
-    elif len(phone) == 10: phone = '7' + phone
-
-    if len(phone) < 10:
-        await message.answer("❌ Неверный номер", reply_markup=kb_back())
+# Хендлер кнопки ЧЕК
+@dp.callback_query(F.data == "check_browser")
+async def check_browser_handler(call: types.CallbackQuery):
+    user_id = call.from_user.id
+    driver = ACTIVE_DRIVERS.get(user_id)
+    
+    if not driver:
+        await call.answer("⚠️ Браузер уже закрыт или не запущен.", show_alert=True)
         return
 
-    msg = await message.answer(f"🚀 **Вхожу...**\nНомер: `+{phone}`", parse_mode="Markdown")
+    await call.answer("📸 Делаю снимок...")
+    try:
+        # Делаем скриншот в отдельном потоке, чтобы не блочить бота
+        screen = await asyncio.to_thread(driver.get_screenshot_as_png)
+        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Текущее состояние браузера")
+    except Exception as e:
+        await call.answer(f"Ошибка скрина: {e}", show_alert=True)
+
+@dp.message(Form.wait_phone)
+async def process(msg: types.Message, state: FSMContext):
+    phone = re.sub(r'\D', '', msg.text)
+    if len(phone) == 11 and phone.startswith('8'): phone = '7' + phone[1:]
+    elif len(phone) == 10: phone = '7' + phone
     
+    if len(phone) < 10:
+        await msg.answer("❌ Неверный номер", reply_markup=kb_back())
+        return
+
+    status_msg = await msg.answer(
+        f"🚀 **Запускаю Chrome...**\nНомер: `+{phone}`\n\nМожете нажать ЧЕК, чтобы проверить экран.", 
+        reply_markup=kb_process(), 
+        parse_mode="Markdown"
+    )
+
     async with BROWSER_SEMAPHORE:
-        await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id, 
-                                  text=f"📲 **Запрос в WhatsApp...**\nЖдите ~30 сек...", parse_mode="Markdown")
-        res = await asyncio.to_thread(run_auth_process, phone)
+        # Передаем user_id для регистрации драйвера
+        res = await asyncio.to_thread(run_auth_process, msg.from_user.id, phone)
+
+    # Удаляем кнопку ЧЕК после завершения
+    try: await status_msg.delete()
+    except: pass
 
     if res['status'] == 'ok':
         if res['type'] == 'code':
-            db_add(message.from_user.id, phone)
-            await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
-                                      text=f"✅ **КОД:** `{res['data']}`", reply_markup=kb_back(), parse_mode="Markdown")
+            db_add(msg.from_user.id, phone)
+            await msg.answer(f"✅ **КОД:** `{res['data']}`\n\nВводите в WhatsApp!", reply_markup=kb_back(), parse_mode="Markdown")
         elif res['type'] == 'screenshot':
-            await msg.delete()
-            await message.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Кода нет. См. скрин.", reply_markup=kb_back())
+            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Кода нет. Вот скриншот.", reply_markup=kb_back())
     else:
-        await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
-                                  text=f"❌ Ошибка: {res['data']}", reply_markup=kb_back())
+        await msg.answer(f"❌ Ошибка: {res['data']}", reply_markup=kb_back())
+    
     await state.clear()
 
+# Остальные хендлеры (списки, удаление)
 @dp.callback_query(F.data == "list_acc")
-async def cb_list(call: types.CallbackQuery):
+async def list_acc(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
     if not accs: await call.message.edit_text("📭 Пусто", reply_markup=kb_back())
     else: await call.message.edit_text(f"📂 **Номера ({len(accs)}):**", reply_markup=kb_acc_list(accs), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "profile")
-async def cb_profile(call: types.CallbackQuery):
+async def profile(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
     await call.message.edit_text(f"👤 **Профиль**\n📱 Номеров: {len(accs)}", reply_markup=kb_back(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("man_"))
-async def cb_manage(call: types.CallbackQuery):
+async def manage(call: types.CallbackQuery):
     acc_id = call.data.split("_")[1]
     await call.message.edit_text(f"⚙️ Аккаунт #{acc_id}", reply_markup=kb_manage(acc_id))
 
 @dp.callback_query(F.data.startswith("del_"))
-async def cb_del(call: types.CallbackQuery):
+async def delete(call: types.CallbackQuery):
     db_delete(call.data.split("_")[1])
     await call.answer("Удалено")
-    await cb_list(call)
-
-# Обработчик мусора
-@dp.message()
-async def trash(msg: types.Message):
-    await msg.answer("👇 Жми кнопки", reply_markup=kb_menu())
+    await list_acc(call)
 
 async def main():
     init_db()
+    print("✅ BOT STARTED (MANUAL DRIVER + CHECK BTN)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
