@@ -6,11 +6,7 @@ import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import (
-    BufferedInputFile, 
-    InlineKeyboardMarkup, 
-    InlineKeyboardButton
-)
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -27,8 +23,7 @@ import time
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-# ОЧЕРЕДЬ: Разрешаем только 1 браузер одновременно, чтобы избежать вылетов памяти
+# Разрешаем 1 поток браузера (безопасно)
 BROWSER_SEMAPHORE = asyncio.Semaphore(1) 
 DB_NAME = 'bot_database.db'
 
@@ -61,94 +56,85 @@ dp = Dispatcher(storage=MemoryStorage())
 class Form(StatesGroup):
     wait_phone = State()
 
-# --- ЛОГИКА БРАУЗЕРА (ANTI-CRASH) ---
-def get_clean_driver():
-    """Создает ультра-легкий Chrome для слабых серверов"""
+# --- ЛОГИКА БРАУЗЕРА ---
+def get_driver():
+    """Конфигурация Chrome для PRO-тарифа (2GB RAM)"""
     options = Options()
-    # Самые важные флаги для Docker
-    options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,720")
     
-    # Отключаем всё лишнее для экономии памяти (RAM)
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-software-rasterizer")
+    # == ОБЯЗАТЕЛЬНЫЕ ФЛАГИ ДЛЯ DOCKER ==
+    options.add_argument("--headless=new") 
+    options.add_argument("--no-sandbox") 
+    options.add_argument("--disable-dev-shm-usage") 
+    options.add_argument("--disable-gpu")
+    
+    # Стандартный размер окна
+    options.add_argument("--window-size=1920,1080")
+    
+    # Отключаем уведомления и инфобары
     options.add_argument("--disable-notifications")
-    options.add_argument("--blink-settings=imagesEnabled=false") # Без картинок
+    options.add_argument("--disable-infobars")
+    
+    # User Agent (как обычный ПК)
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Инициализация
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
         return driver
     except Exception as e:
-        logging.error(f"Failed to start driver: {e}")
+        logging.error(f"❌ Driver Init Error: {e}")
         raise e
 
 def run_auth_process(phone_number):
-    """
-    Основной процесс входа. Возвращает статус и данные (код или скриншот).
-    """
     driver = None
     try:
-        driver = get_clean_driver()
-        # Таймауты
-        driver.set_page_load_timeout(60)
-        driver.implicitly_wait(10)
+        driver = get_driver()
+        driver.set_page_load_timeout(60) # 60 сек на загрузку
         
+        # Переход на сайт
         driver.get("https://web.whatsapp.com/")
-        wait = WebDriverWait(driver, 50) # Ждем загрузки до 50 сек
+        wait = WebDriverWait(driver, 45)
 
-        # 1. Нажимаем "Link with phone number" (используем JavaScript для надежности)
+        # 1. Жмем "Link with phone number" (если есть)
         try:
             btn_xpath = "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]"
             btn = wait.until(EC.presence_of_element_located((By.XPATH, btn_xpath)))
             driver.execute_script("arguments[0].click();", btn)
-        except Exception:
-            pass # Если кнопки нет, возможно мы уже на форме ввода
+        except Exception: 
+            pass 
 
         # 2. Вводим номер
         time.sleep(2)
-        inp_xpath = "//input[@aria-label='Type your phone number.'] | //input[@type='text']"
-        inp = wait.until(EC.presence_of_element_located((By.XPATH, inp_xpath)))
+        inp = wait.until(EC.presence_of_element_located((By.XPATH, "//input[@aria-label='Type your phone number.'] | //input[@type='text']")))
         inp.clear()
         for ch in phone_number:
             inp.send_keys(ch)
             time.sleep(0.05)
         
-        # 3. Нажимаем Next (через JS)
-        try:
-            next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
-            driver.execute_script("arguments[0].click();", next_btn)
-        except Exception as e:
-            return {"status": "error", "data": f"Кнопка Next не нажалась: {e}"}
+        # 3. Жмем Next
+        next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
+        driver.execute_script("arguments[0].click();", next_btn)
 
-        # 4. Ждем Код
+        # 4. Ждем Код (или скриншот ошибки)
         try:
-            # Ищем блок с кодом
             code_el = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@aria-details='link-device-phone-number-code']")))
-            time.sleep(1) # Даем тексту прогрузиться
+            time.sleep(1) 
             return {"status": "ok", "type": "code", "data": code_el.text}
-        
         except Exception:
-            # Если кода нет, делаем скриншот (вдруг там QR или капча)
+            # Делаем скриншот, если кода нет
             screenshot = driver.get_screenshot_as_png()
             return {"status": "ok", "type": "screenshot", "data": screenshot}
 
     except Exception as e:
         return {"status": "error", "data": str(e)}
     finally:
-        # ОБЯЗАТЕЛЬНО убиваем процесс
         if driver:
             try:
                 driver.quit()
             except:
                 pass
 
-# --- КЛАВИАТУРЫ (INLINE) ---
+# --- КЛАВИАТУРЫ ---
 def kb_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_acc")],
@@ -157,12 +143,11 @@ def kb_menu():
     ])
 
 def kb_back():
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад в меню", callback_data="main_menu")]])
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]])
 
 def kb_acc_list(accounts):
     kb = []
     for acc in accounts:
-        # acc: (id, phone)
         kb.append([InlineKeyboardButton(text=f"📱 +{acc[1]}", callback_data=f"man_{acc[0]}")])
     kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
@@ -173,16 +158,11 @@ def kb_manage(acc_id):
         [InlineKeyboardButton(text="🔙 К списку", callback_data="list_acc")]
     ])
 
-# --- ОБРАБОТЧИКИ (HANDLERS) ---
-
+# --- ХЕНДЛЕРЫ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "👋 **WhatsApp Manager**\n\nУправление через кнопки ниже 👇", 
-        reply_markup=kb_menu(), 
-        parse_mode="Markdown"
-    )
+    await message.answer("👋 **WhatsApp Manager**", reply_markup=kb_menu(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "main_menu")
 async def cb_menu(call: types.CallbackQuery, state: FSMContext):
@@ -192,108 +172,54 @@ async def cb_menu(call: types.CallbackQuery, state: FSMContext):
     except:
         await call.message.answer("👋 **Главное меню**", reply_markup=kb_menu(), parse_mode="Markdown")
 
-# --- ДОБАВЛЕНИЕ ---
 @dp.callback_query(F.data == "add_acc")
 async def cb_add(call: types.CallbackQuery, state: FSMContext):
-    # Проверка очереди
     if BROWSER_SEMAPHORE.locked():
-        await call.answer("⚠️ Сервер занят (другой пользователь входит). Подождите 15 сек!", show_alert=True)
+        await call.answer("⚠️ Очередь занята. Ждите...", show_alert=True)
         return
-
-    await call.message.edit_text(
-        "📞 **Введите номер телефона**\n"
-        "Формат любой: `+7 999...` или `8999...`\n\n"
-        "👇 Отправьте цифры сообщением.", 
-        reply_markup=kb_back(),
-        parse_mode="Markdown"
-    )
+    await call.message.edit_text("📞 **Введите номер** (7999...)", reply_markup=kb_back(), parse_mode="Markdown")
     await state.set_state(Form.wait_phone)
 
 @dp.message(Form.wait_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    # Очистка номера
-    raw = message.text
-    digits = re.sub(r'\D', '', raw)
-    
-    # Логика 8 -> 7
-    if len(digits) == 11 and digits.startswith('8'):
-        phone = '7' + digits[1:]
-    elif len(digits) == 10:
-        phone = '7' + digits
-    else:
-        phone = digits
+    phone = re.sub(r'\D', '', message.text)
+    if len(phone) == 11 and phone.startswith('8'): phone = '7' + phone[1:]
+    elif len(phone) == 10: phone = '7' + phone
 
     if len(phone) < 10:
-        await message.answer("❌ Неверный формат. Попробуйте еще раз.", reply_markup=kb_back())
+        await message.answer("❌ Неверный номер", reply_markup=kb_back())
         return
 
-    # Сообщение о запуске
-    status_msg = await message.answer(f"🚀 **Запуск...**\nНомер: `+{phone}`\n⏳ Ждите...", parse_mode="Markdown")
+    msg = await message.answer(f"🚀 **Вхожу...**\nНомер: `+{phone}`", parse_mode="Markdown")
     
-    # Вход в Semaphore (Блокировка других юзеров)
     async with BROWSER_SEMAPHORE:
-        await bot.edit_message_text(
-            chat_id=message.chat.id, 
-            message_id=status_msg.message_id, 
-            text=f"📲 **Ввожу данные в WhatsApp...**\nНомер: `+{phone}`\n⏳ Это займет 20-40 сек...", 
-            parse_mode="Markdown"
-        )
-        
-        # Запуск тяжелой задачи в потоке
+        await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id, 
+                                  text=f"📲 **Запрос в WhatsApp...**\nЖдите ~30 сек...", parse_mode="Markdown")
         res = await asyncio.to_thread(run_auth_process, phone)
 
-    # Результат
     if res['status'] == 'ok':
         if res['type'] == 'code':
-            # УСПЕХ: КОД
             db_add(message.from_user.id, phone)
-            # Форматирование 123456 -> 123-456
-            raw_code = res['data'].replace('-', '')
-            fmt_code = f"{raw_code[:4]}-{raw_code[4:]}"
-            
-            await bot.edit_message_text(
-                chat_id=message.chat.id, 
-                message_id=status_msg.message_id,
-                text=f"✅ **КОД ДЛЯ ВХОДА:**\n\n`{fmt_code}`\n\n"
-                     f"⚠️ Введите его в WhatsApp на телефоне.",
-                reply_markup=kb_back(),
-                parse_mode="Markdown"
-            )
+            await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                      text=f"✅ **КОД:** `{res['data']}`", reply_markup=kb_back(), parse_mode="Markdown")
         elif res['type'] == 'screenshot':
-            # УСПЕХ: СКРИН (если кода нет)
-            photo = BufferedInputFile(res['data'], "screen.png")
-            await status_msg.delete() 
-            await message.answer_photo(photo, caption="⚠️ Код не появился. См. скриншот.", reply_markup=kb_back())
+            await msg.delete()
+            await message.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Кода нет. См. скрин.", reply_markup=kb_back())
     else:
-        # ОШИБКА
-        await bot.edit_message_text(
-            chat_id=message.chat.id, 
-            message_id=status_msg.message_id,
-            text=f"❌ **Ошибка:** {res['data']}\nПопробуйте позже.", 
-            reply_markup=kb_back(),
-            parse_mode="Markdown"
-        )
-    
+        await bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                  text=f"❌ Ошибка: {res['data']}", reply_markup=kb_back())
     await state.clear()
 
-# --- СПИСКИ И УПРАВЛЕНИЕ ---
 @dp.callback_query(F.data == "list_acc")
 async def cb_list(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
-    if not accs:
-        await call.message.edit_text("📭 Список пуст.", reply_markup=kb_back())
-    else:
-        await call.message.edit_text(f"📂 **Ваши номера ({len(accs)}):**", reply_markup=kb_acc_list(accs), parse_mode="Markdown")
+    if not accs: await call.message.edit_text("📭 Пусто", reply_markup=kb_back())
+    else: await call.message.edit_text(f"📂 **Номера ({len(accs)}):**", reply_markup=kb_acc_list(accs), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "profile")
 async def cb_profile(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
-    txt = (
-        f"👤 **Профиль**\n"
-        f"🆔 ID: `{call.from_user.id}`\n"
-        f"📱 Номеров: **{len(accs)}**"
-    )
-    await call.message.edit_text(txt, reply_markup=kb_back(), parse_mode="Markdown")
+    await call.message.edit_text(f"👤 **Профиль**\n📱 Номеров: {len(accs)}", reply_markup=kb_back(), parse_mode="Markdown")
 
 @dp.callback_query(F.data.startswith("man_"))
 async def cb_manage(call: types.CallbackQuery):
@@ -301,20 +227,20 @@ async def cb_manage(call: types.CallbackQuery):
     await call.message.edit_text(f"⚙️ Аккаунт #{acc_id}", reply_markup=kb_manage(acc_id))
 
 @dp.callback_query(F.data.startswith("del_"))
-async def cb_delete(call: types.CallbackQuery):
-    acc_id = call.data.split("_")[1]
-    db_delete(acc_id)
-    await call.answer("✅ Удалено!", show_alert=True)
-    await cb_list(call) 
+async def cb_del(call: types.CallbackQuery):
+    db_delete(call.data.split("_")[1])
+    await call.answer("Удалено")
+    await cb_list(call)
 
-# --- ЗАПУСК ---
+# Обработчик мусора
+@dp.message()
+async def trash(msg: types.Message):
+    await msg.answer("👇 Жми кнопки", reply_markup=kb_menu())
+
 async def main():
     init_db()
-    print("✅ BOT STARTED (ULTRA INLINE MODE)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    try: asyncio.run(main())
+    except KeyboardInterrupt: pass
