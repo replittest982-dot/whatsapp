@@ -1,3 +1,4 @@
+
 import asyncio
 import os
 import logging
@@ -61,7 +62,7 @@ class Form(StatesGroup):
 def get_driver():
     options = Options()
     
-    # 1. Находим путь к Chrome (для надежности)
+    # 1. Находим путь к Chrome (так как в slim образах он может быть в opt)
     CHROME_BINARIES = ["/usr/bin/google-chrome", "/opt/google/chrome/chrome"]
     found_path = next((p for p in CHROME_BINARIES if os.path.exists(p)), "/usr/bin/google-chrome")
     options.binary_location = found_path
@@ -94,7 +95,8 @@ def run_auth_process(user_id, phone_number):
         
         driver.set_page_load_timeout(60)
         driver.get("https://web.whatsapp.com/")
-        wait = WebDriverWait(driver, 45)
+        # УВЕЛИЧЕННЫЙ ТАЙМАУТ
+        wait = WebDriverWait(driver, 75)
 
         # === ШАГ 1: ЖМЕМ "Link with phone number" ===
         try:
@@ -102,20 +104,23 @@ def run_auth_process(user_id, phone_number):
             btn_xpath = "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]"
             btn = wait.until(EC.element_to_be_clickable((By.XPATH, btn_xpath)))
             driver.execute_script("arguments[0].click();", btn)
-            time.sleep(2) # Даем анимации пройти
+            time.sleep(3) # Даем анимации пройти
         except Exception as e:
-            # Если не нашли, может мы уже там?
+            # Если кнопки нет, возможно мы уже на форме или WhatsApp показывает только QR
             pass 
 
-        # === ШАГ 2: ВВОД НОМЕРА ===
+        # === ШАГ 2: ВВОД НОМЕРА (JS INJECTION) ===
         try:
             inp_xpath = "//input[@aria-label='Type your phone number.'] | //input[@type='text']"
             inp = wait.until(EC.presence_of_element_located((By.XPATH, inp_xpath)))
-            inp.clear()
-            for ch in phone_number:
-                inp.send_keys(ch)
-                time.sleep(0.05)
             
+            # ЧИСТЫЙ JS ВВОД (Чтобы не было ошибки Stacktrace)
+            driver.execute_script(f"arguments[0].value = '+{phone_number}';", inp)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", inp)
+            driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", inp)
+            
+            time.sleep(2) # Ждем обработки
+
             # Жмем NEXT
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
             driver.execute_script("arguments[0].click();", next_btn)
@@ -124,12 +129,13 @@ def run_auth_process(user_id, phone_number):
 
         # === ШАГ 3: ЖДЕМ КОД ===
         try:
-            # Ищем 8 цифр/букв
-            code_el = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@aria-details='link-device-phone-number-code']")))
+            # Ищем 8 цифр/букв (расширенный поиск)
+            code_el_xpath = "//div[@aria-details='link-device-phone-number-code'] | //span[contains(@aria-label, 'link code')]"
+            code_el = wait.until(EC.presence_of_element_located((By.XPATH, code_el_xpath)))
             time.sleep(1) # Ждем рендера
             return {"status": "ok", "type": "code", "data": code_el.text}
         except:
-            # Если кода нет, делаем скрин (может там ошибка номера)
+            # Если кода нет, делаем скрин (может там ошибка номера или QR)
             screenshot = driver.get_screenshot_as_png()
             return {"status": "ok", "type": "screenshot", "data": screenshot}
 
@@ -197,7 +203,7 @@ async def add(call: types.CallbackQuery, state: FSMContext):
 async def check(call: types.CallbackQuery):
     driver = ACTIVE_DRIVERS.get(call.from_user.id)
     if not driver:
-        await call.answer("⚠️ Браузер не активен.", show_alert=True)
+        await call.answer("⚠️ Браузер не активен (или завершил работу).", show_alert=True)
         return
     await call.answer("📸 Снимаю...")
     try:
@@ -217,7 +223,7 @@ async def process(msg: types.Message, state: FSMContext):
         return
 
     status = await msg.answer(
-        f"🚀 **Запуск Chrome...**\nНомер: `+{phone}`\n\nМожешь нажать кнопку ЧЕК, чтобы следить.", 
+        f"🚀 **Запуск Chrome...**\nНомер: `+{phone}`\n\n👇 Жми ЧЕК, если долго грузится.", 
         reply_markup=kb_process(), 
         parse_mode="Markdown"
     )
@@ -235,7 +241,7 @@ async def process(msg: types.Message, state: FSMContext):
             code = res['data'].replace("-", "")
             await msg.answer(f"✅ **КОД ВХОДА:**\n\n`{code}`\n\nВводи скорее!", reply_markup=kb_back(), parse_mode="Markdown")
         elif res['type'] == 'screenshot':
-            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Кода нет (см. скрин). Проверь номер.", reply_markup=kb_back())
+            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Кода нет. Возможно, WhatsApp требует QR-код (см. скрин).", reply_markup=kb_back())
     else:
         await msg.answer(f"❌ Ошибка: {res['data']}", reply_markup=kb_back())
     
