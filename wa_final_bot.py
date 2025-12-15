@@ -1,4 +1,3 @@
-
 import asyncio
 import os
 import logging
@@ -58,11 +57,11 @@ dp = Dispatcher(storage=MemoryStorage())
 class Form(StatesGroup):
     wait_phone = State()
 
-# --- ЛОГИКА БРАУЗЕРА ---
+# --- ЛОГИКА БРАУЗЕРА (EDGE MODE) ---
 def get_driver():
     options = Options()
     
-    # 1. Находим путь к Chrome (так как в slim образах он может быть в opt)
+    # 1. Находим путь к Chrome
     CHROME_BINARIES = ["/usr/bin/google-chrome", "/opt/google/chrome/chrome"]
     found_path = next((p for p in CHROME_BINARIES if os.path.exists(p)), "/usr/bin/google-chrome")
     options.binary_location = found_path
@@ -75,9 +74,13 @@ def get_driver():
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--window-size=1280,720")
     options.add_argument("--ignore-certificate-errors")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # 3. Указываем драйвер (установленный в Dockerfile)
+    # !!! МАСКИРОВКА ПОД MICROSOFT EDGE (LINUX) !!!
+    # Именно это использует конкурент для получения кодов
+    EDGE_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
+    options.add_argument(f"user-agent={EDGE_UA}")
+    
+    # 3. Указываем драйвер
     service = Service(executable_path="/usr/local/bin/chromedriver")
     
     try:
@@ -95,47 +98,49 @@ def run_auth_process(user_id, phone_number):
         
         driver.set_page_load_timeout(60)
         driver.get("https://web.whatsapp.com/")
-        # УВЕЛИЧЕННЫЙ ТАЙМАУТ
+        # УВЕЛИЧЕННЫЙ ТАЙМАУТ (75 сек)
         wait = WebDriverWait(driver, 75)
 
         # === ШАГ 1: ЖМЕМ "Link with phone number" ===
         try:
-            # Ищем по части текста, так надежнее
             btn_xpath = "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]"
             btn = wait.until(EC.element_to_be_clickable((By.XPATH, btn_xpath)))
             driver.execute_script("arguments[0].click();", btn)
-            time.sleep(3) # Даем анимации пройти
+            time.sleep(3) 
         except Exception as e:
-            # Если кнопки нет, возможно мы уже на форме или WhatsApp показывает только QR
             pass 
 
-        # === ШАГ 2: ВВОД НОМЕРА (JS INJECTION) ===
+        # === ШАГ 2: ВВОД НОМЕРА (АГРЕССИВНЫЙ МЕТОД) ===
         try:
             inp_xpath = "//input[@aria-label='Type your phone number.'] | //input[@type='text']"
             inp = wait.until(EC.presence_of_element_located((By.XPATH, inp_xpath)))
             
-            # ЧИСТЫЙ JS ВВОД (Чтобы не было ошибки Stacktrace)
+            # 1. Фокус
+            driver.execute_script("arguments[0].focus();", inp)
+            time.sleep(0.5)
+
+            # 2. Ввод значения через JS
             driver.execute_script(f"arguments[0].value = '+{phone_number}';", inp)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", inp)
             driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", inp)
             
-            time.sleep(2) # Ждем обработки
+            time.sleep(2) 
 
-            # Жмем NEXT
+            # 3. Нажатие NEXT
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
             driver.execute_script("arguments[0].click();", next_btn)
         except Exception as e:
              return {"status": "error", "data": f"Ошибка ввода номера: {e}"}
 
-        # === ШАГ 3: ЖДЕМ КОД ===
+        # === ШАГ 3: ЖДЕМ КОД ИЛИ СКРИН ===
         try:
-            # Ищем 8 цифр/букв (расширенный поиск)
+            # Ищем 8 цифр
             code_el_xpath = "//div[@aria-details='link-device-phone-number-code'] | //span[contains(@aria-label, 'link code')]"
             code_el = wait.until(EC.presence_of_element_located((By.XPATH, code_el_xpath)))
-            time.sleep(1) # Ждем рендера
+            time.sleep(1) 
             return {"status": "ok", "type": "code", "data": code_el.text}
         except:
-            # Если кода нет, делаем скрин (может там ошибка номера или QR)
+            # Если кода нет (таймаут), делаем скриншот (скорее всего там QR)
             screenshot = driver.get_screenshot_as_png()
             return {"status": "ok", "type": "screenshot", "data": screenshot}
 
@@ -208,7 +213,7 @@ async def check(call: types.CallbackQuery):
     await call.answer("📸 Снимаю...")
     try:
         screen = await asyncio.to_thread(driver.get_screenshot_as_png)
-        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Текущий экран")
+        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Текущий экран (Edge)")
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
 
@@ -223,7 +228,7 @@ async def process(msg: types.Message, state: FSMContext):
         return
 
     status = await msg.answer(
-        f"🚀 **Запуск Chrome...**\nНомер: `+{phone}`\n\n👇 Жми ЧЕК, если долго грузится.", 
+        f"🚀 **Запуск Edge (Linux)...**\nНомер: `+{phone}`\n\n👇 Жми ЧЕК для проверки.", 
         reply_markup=kb_process(), 
         parse_mode="Markdown"
     )
@@ -237,17 +242,16 @@ async def process(msg: types.Message, state: FSMContext):
     if res['status'] == 'ok':
         if res['type'] == 'code':
             db_add(msg.from_user.id, phone)
-            # Форматируем код красиво
             code = res['data'].replace("-", "")
             await msg.answer(f"✅ **КОД ВХОДА:**\n\n`{code}`\n\nВводи скорее!", reply_markup=kb_back(), parse_mode="Markdown")
         elif res['type'] == 'screenshot':
-            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Кода нет. Возможно, WhatsApp требует QR-код (см. скрин).", reply_markup=kb_back())
+            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Код не найден (возможно QR). См. скрин.", reply_markup=kb_back())
     else:
         await msg.answer(f"❌ Ошибка: {res['data']}", reply_markup=kb_back())
     
     await state.clear()
 
-# Остальные функции (список, удаление)
+# Остальные функции
 @dp.callback_query(F.data == "list_acc")
 async def list_acc(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
@@ -272,7 +276,7 @@ async def delete(call: types.CallbackQuery):
 
 async def main():
     init_db()
-    print("✅ BOT STARTED")
+    print("✅ BOT STARTED (EDGE MODE)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
