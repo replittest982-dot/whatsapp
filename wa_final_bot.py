@@ -25,8 +25,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 BROWSER_SEMAPHORE = asyncio.Semaphore(1) 
 DB_NAME = 'bot_database.db'
 
-# ГЛОБАЛЬНЫЙ СЛОВАРЬ ДЛЯ КНОПКИ "ЧЕК"
-# user_id -> driver_instance
 ACTIVE_DRIVERS = {}
 
 # --- БАЗА ДАННЫХ ---
@@ -61,16 +59,15 @@ class Form(StatesGroup):
 # --- ЛОГИКА БРАУЗЕРА ---
 def get_driver():
     options = Options()
-    # Флаги стабильности
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage") 
     options.add_argument("--disable-gpu")
-    options.add_argument("--disable-setuid-sandbox") # Важно!
+    options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--window-size=1280,720")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # ПРЯМОЙ ПУТЬ К ДРАЙВЕРУ (из Dockerfile)
+    # ПУТЬ К ДРАЙВЕРУ (из Dockerfile)
     service = Service(executable_path="/usr/local/bin/chromedriver")
     
     try:
@@ -84,12 +81,11 @@ def run_auth_process(user_id, phone_number):
     driver = None
     try:
         driver = get_driver()
-        # Регистрируем драйвер для кнопки ЧЕК
         ACTIVE_DRIVERS[user_id] = driver
         
         driver.set_page_load_timeout(60)
         driver.get("https://web.whatsapp.com/")
-        wait = WebDriverWait(driver, 60) # Ждем прогрузки QR/кода
+        wait = WebDriverWait(driver, 60)
 
         # 1. Жмем Link with phone number
         try:
@@ -122,7 +118,6 @@ def run_auth_process(user_id, phone_number):
     except Exception as e:
         return {"status": "error", "data": str(e)}
     finally:
-        # Убираем из активных и закрываем
         if user_id in ACTIVE_DRIVERS:
             del ACTIVE_DRIVERS[user_id]
         if driver:
@@ -141,7 +136,6 @@ def kb_back():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")]])
 
 def kb_process():
-    # Кнопка ЧЕК для проверки браузера
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📷 ЧЕК (Скриншот)", callback_data="check_browser")]
     ])
@@ -179,23 +173,19 @@ async def add(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("📞 **Введите номер** (7999...)", reply_markup=kb_back(), parse_mode="Markdown")
     await state.set_state(Form.wait_phone)
 
-# Хендлер кнопки ЧЕК
 @dp.callback_query(F.data == "check_browser")
 async def check_browser_handler(call: types.CallbackQuery):
     user_id = call.from_user.id
     driver = ACTIVE_DRIVERS.get(user_id)
-    
     if not driver:
-        await call.answer("⚠️ Браузер уже закрыт или не запущен.", show_alert=True)
+        await call.answer("⚠️ Браузер уже закрыт.", show_alert=True)
         return
-
     await call.answer("📸 Делаю снимок...")
     try:
-        # Делаем скриншот в отдельном потоке, чтобы не блочить бота
         screen = await asyncio.to_thread(driver.get_screenshot_as_png)
-        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Текущее состояние браузера")
+        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Экран браузера")
     except Exception as e:
-        await call.answer(f"Ошибка скрина: {e}", show_alert=True)
+        await call.answer(f"Ошибка: {e}", show_alert=True)
 
 @dp.message(Form.wait_phone)
 async def process(msg: types.Message, state: FSMContext):
@@ -214,10 +204,8 @@ async def process(msg: types.Message, state: FSMContext):
     )
 
     async with BROWSER_SEMAPHORE:
-        # Передаем user_id для регистрации драйвера
         res = await asyncio.to_thread(run_auth_process, msg.from_user.id, phone)
 
-    # Удаляем кнопку ЧЕК после завершения
     try: await status_msg.delete()
     except: pass
 
@@ -232,7 +220,6 @@ async def process(msg: types.Message, state: FSMContext):
     
     await state.clear()
 
-# Остальные хендлеры (списки, удаление)
 @dp.callback_query(F.data == "list_acc")
 async def list_acc(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
@@ -257,7 +244,7 @@ async def delete(call: types.CallbackQuery):
 
 async def main():
     init_db()
-    print("✅ BOT STARTED (MANUAL DRIVER + CHECK BTN)")
+    print("✅ BOT STARTED")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
