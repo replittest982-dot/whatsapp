@@ -1,7 +1,7 @@
 # 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Установка системных зависимостей (MAXIMUM PACK)
+# 2. Установка системных зависимостей (ПОЛНЫЙ ПАКЕТ ПРОТИВ ВЫЛЕТОВ)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl unzip gnupg ca-certificates jq \
     libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
@@ -20,18 +20,19 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. АВТОМАТИЧЕСКАЯ УСТАНОВКА CHROME DRIVER (ПОД ВЕРСИЮ БРАУЗЕРА)
-# Этот скрипт сам находит нужную версию, чтобы не было ошибки "session not created"
+# 4. УМНАЯ УСТАНОВКА ДРАЙВЕРА (Matching Version)
+# Скрипт смотрит версию Chrome и качает драйвер РОВНО под неё.
 RUN CHROME_VER=$(google-chrome --version | awk '{print $3}') \
-    && echo "Installed Chrome Version: $CHROME_VER" \
+    && echo "🔥 Installed Chrome: $CHROME_VER" \
+    # Пытаемся найти драйвер. Если точной версии нет, берем версию Major (например, 131...)
     && URL="https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VER/linux64/chromedriver-linux64.zip" \
-    && echo "Downloading Driver from: $URL" \
+    && echo "Downloading from: $URL" \
     && wget -q -O /tmp/chromedriver.zip "$URL" \
-    || (echo "Exact version not found, trying Major version match..." \
+    || (echo "⚠️ Exact version not found, finding closest match..." \
         && MAJOR=$(echo $CHROME_VER | cut -d. -f1) \
         && LATEST_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json" | jq -r ".milestones.\"$MAJOR\".downloads.chromedriver[] | select(.platform == \"linux64\") | .url") \
         && wget -q -O /tmp/chromedriver.zip "$LATEST_URL") \
-    && unzip /tmp/chromedriver.zip -d /usr/local/bin/ \
+    && unzip -o /tmp/chromedriver.zip -d /usr/local/bin/ \
     && mv /usr/local/bin/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
     && rm -rf /tmp/chromedriver.zip /usr/local/bin/chromedriver-linux64
@@ -42,7 +43,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY wa_final_bot.py .
 
-# 6. Переменные
+# 6. Окружение
 ENV CHROME_EXECUTABLE_PATH=/usr/bin/google-chrome
 ENV SHM_SIZE=2g
 
