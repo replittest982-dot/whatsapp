@@ -1,8 +1,7 @@
 # 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Установка системных зависимостей (MAXIMUM PACK)
-# Этот список нужен, чтобы Chrome не вылетал с ошибкой "Tab Crashed"
+# 2. Установка системных зависимостей (ПАКЕТ ПРОТИВ ВЫЛЕТОВ)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl unzip gnupg ca-certificates jq \
     libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
@@ -21,11 +20,9 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. УМНАЯ УСТАНОВКА ДРАЙВЕРА (МАТЧИНГ ВЕРСИЙ)
-# Скрипт смотрит версию Chrome и качает драйвер РОВНО под неё.
+# 4. УМНАЯ УСТАНОВКА ДРАЙВЕРА
 RUN CHROME_VER=$(google-chrome --version | awk '{print $3}') \
     && echo "🔥 Installed Chrome: $CHROME_VER" \
-    # Пытаемся найти драйвер. Если точной версии нет, берем версию Major (например, 131...)
     && URL="https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VER/linux64/chromedriver-linux64.zip" \
     && echo "Downloading from: $URL" \
     && wget -q -O /tmp/chromedriver.zip "$URL" \
