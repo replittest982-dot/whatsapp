@@ -57,30 +57,32 @@ dp = Dispatcher(storage=MemoryStorage())
 class Form(StatesGroup):
     wait_phone = State()
 
-# --- ЛОГИКА БРАУЗЕРА (EDGE MODE) ---
+# --- ЛОГИКА БРАУЗЕРА (EDGE + NETHERLANDS MASK) ---
 def get_driver():
     options = Options()
     
-    # 1. Находим путь к Chrome
+    # 1. Путь к Chrome
     CHROME_BINARIES = ["/usr/bin/google-chrome", "/opt/google/chrome/chrome"]
     found_path = next((p for p in CHROME_BINARIES if os.path.exists(p)), "/usr/bin/google-chrome")
     options.binary_location = found_path
 
-    # 2. Флаги стабильности
+    # 2. Флаги (Стабильность + Анти-детект)
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage") 
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-setuid-sandbox")
-    options.add_argument("--window-size=1280,720")
+    options.add_argument("--window-size=1366,768") # Стандартный размер ноута
     options.add_argument("--ignore-certificate-errors")
     
-    # !!! МАСКИРОВКА ПОД MICROSOFT EDGE (LINUX) !!!
-    # Именно это использует конкурент для получения кодов
+    # User-Agent: Microsoft Edge (Linux) - как у конкурентов
     EDGE_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0'
     options.add_argument(f"user-agent={EDGE_UA}")
+
+    # Язык: Английский (Международный), чтобы не палить RU локаль
+    options.add_argument("accept-language=en-US,en;q=0.9") 
     
-    # 3. Указываем драйвер
+    # 3. Драйвер
     service = Service(executable_path="/usr/local/bin/chromedriver")
     
     try:
@@ -94,23 +96,24 @@ def run_auth_process(user_id, phone_number):
     driver = None
     try:
         driver = get_driver()
-        ACTIVE_DRIVERS[user_id] = driver # Сохраняем для чека
+        ACTIVE_DRIVERS[user_id] = driver 
         
         driver.set_page_load_timeout(60)
         driver.get("https://web.whatsapp.com/")
-        # УВЕЛИЧЕННЫЙ ТАЙМАУТ (75 сек)
-        wait = WebDriverWait(driver, 75)
+        wait = WebDriverWait(driver, 60)
 
-        # === ШАГ 1: ЖМЕМ "Link with phone number" ===
+        # === ШАГ 1: "Link with phone number" ===
         try:
+            # Ищем чуть дольше, чтобы страница точно прогрузилась
+            time.sleep(5) 
             btn_xpath = "//span[contains(text(), 'Link with phone number')] | //div[contains(text(), 'Link with phone number')]"
             btn = wait.until(EC.element_to_be_clickable((By.XPATH, btn_xpath)))
             driver.execute_script("arguments[0].click();", btn)
-            time.sleep(3) 
+            time.sleep(2) 
         except Exception as e:
             pass 
 
-        # === ШАГ 2: ВВОД НОМЕРА (АГРЕССИВНЫЙ МЕТОД) ===
+        # === ШАГ 2: ВВОД НОМЕРА (SUPER SAFE MODE) ===
         try:
             inp_xpath = "//input[@aria-label='Type your phone number.'] | //input[@type='text']"
             inp = wait.until(EC.presence_of_element_located((By.XPATH, inp_xpath)))
@@ -119,30 +122,45 @@ def run_auth_process(user_id, phone_number):
             driver.execute_script("arguments[0].focus();", inp)
             time.sleep(0.5)
 
-            # 2. Ввод значения через JS
+            # 2. Ввод JS
             driver.execute_script(f"arguments[0].value = '+{phone_number}';", inp)
             driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", inp)
+            time.sleep(0.2)
             driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", inp)
             
+            # 3. УБИРАЕМ ФОКУС (BLUR) - Важно для валидации!
+            driver.execute_script("arguments[0].blur();", inp)
             time.sleep(2) 
 
-            # 3. Нажатие NEXT
+            # 4. Жмем NEXT
             next_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//div[text()='Next']")))
             driver.execute_script("arguments[0].click();", next_btn)
+            
         except Exception as e:
-             return {"status": "error", "data": f"Ошибка ввода номера: {e}"}
+             return {"status": "error", "data": f"Ввод: {e}"}
 
-        # === ШАГ 3: ЖДЕМ КОД ИЛИ СКРИН ===
-        try:
-            # Ищем 8 цифр
-            code_el_xpath = "//div[@aria-details='link-device-phone-number-code'] | //span[contains(@aria-label, 'link code')]"
-            code_el = wait.until(EC.presence_of_element_located((By.XPATH, code_el_xpath)))
-            time.sleep(1) 
-            return {"status": "ok", "type": "code", "data": code_el.text}
-        except:
-            # Если кода нет (таймаут), делаем скриншот (скорее всего там QR)
-            screenshot = driver.get_screenshot_as_png()
-            return {"status": "ok", "type": "screenshot", "data": screenshot}
+        # === ШАГ 3: АКТИВНЫЙ ПОИСК КОДА (БЕЗ ОЖИДАНИЯ) ===
+        # Мы будем проверять наличие кода в цикле в течение 60 секунд.
+        # Как только найдем - сразу возвращаем.
+        
+        start_time = time.time()
+        code_xpath = "//div[@aria-details='link-device-phone-number-code'] | //span[contains(@aria-label, 'link code')]"
+        
+        while time.time() - start_time < 60:
+            try:
+                # Пытаемся найти элемент БЫСТРО (таймаут 1 сек)
+                code_el = driver.find_element(By.XPATH, code_xpath)
+                if code_el and code_el.text.strip():
+                    return {"status": "ok", "type": "code", "data": code_el.text}
+            except:
+                # Если не нашли, ждем немного и повторяем
+                pass
+            
+            time.sleep(1) # Проверка каждую секунду
+
+        # Если цикл закончился, а кода нет -> Скриншот (значит QR или ошибка)
+        screenshot = driver.get_screenshot_as_png()
+        return {"status": "ok", "type": "screenshot", "data": screenshot}
 
     except Exception as e:
         return {"status": "error", "data": str(e)}
@@ -187,7 +205,7 @@ def kb_manage(acc_id):
 @dp.message(Command("start"))
 async def start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("👋 **WhatsApp Manager**", reply_markup=kb_menu(), parse_mode="Markdown")
+    await msg.answer("👋 **WhatsApp Manager**\n🇳🇱 Mode: Netherlands/Edge", reply_markup=kb_menu(), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "main_menu")
 async def menu(call: types.CallbackQuery, state: FSMContext):
@@ -203,17 +221,16 @@ async def add(call: types.CallbackQuery, state: FSMContext):
     await call.message.edit_text("📞 **Введите номер телефона** (79XXXXXXXXX)", reply_markup=kb_back(), parse_mode="Markdown")
     await state.set_state(Form.wait_phone)
 
-# ПРОВЕРКА ЭКРАНА
 @dp.callback_query(F.data == "check_browser")
 async def check(call: types.CallbackQuery):
     driver = ACTIVE_DRIVERS.get(call.from_user.id)
     if not driver:
-        await call.answer("⚠️ Браузер не активен (или завершил работу).", show_alert=True)
+        await call.answer("⚠️ Браузер не активен.", show_alert=True)
         return
     await call.answer("📸 Снимаю...")
     try:
         screen = await asyncio.to_thread(driver.get_screenshot_as_png)
-        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Текущий экран (Edge)")
+        await call.message.answer_photo(BufferedInputFile(screen, "status.png"), caption="👀 Текущий экран")
     except Exception as e:
         await call.answer(f"Ошибка: {e}", show_alert=True)
 
@@ -228,7 +245,7 @@ async def process(msg: types.Message, state: FSMContext):
         return
 
     status = await msg.answer(
-        f"🚀 **Запуск Edge (Linux)...**\nНомер: `+{phone}`\n\n👇 Жми ЧЕК для проверки.", 
+        f"🚀 **Запуск...**\n🌍 Server: NL Mode\n📱 Номер: `+{phone}`\n\n⏳ Ждем код (до 60 сек)...", 
         reply_markup=kb_process(), 
         parse_mode="Markdown"
     )
@@ -243,15 +260,14 @@ async def process(msg: types.Message, state: FSMContext):
         if res['type'] == 'code':
             db_add(msg.from_user.id, phone)
             code = res['data'].replace("-", "")
-            await msg.answer(f"✅ **КОД ВХОДА:**\n\n`{code}`\n\nВводи скорее!", reply_markup=kb_back(), parse_mode="Markdown")
+            await msg.answer(f"✅ **КОД ПОЛУЧЕН:**\n\n`{code}`", reply_markup=kb_back(), parse_mode="Markdown")
         elif res['type'] == 'screenshot':
-            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Код не найден (возможно QR). См. скрин.", reply_markup=kb_back())
+            await msg.answer_photo(BufferedInputFile(res['data'], "err.png"), caption="⚠️ Код не пришел (см. скрин). Скорее всего нужен QR.", reply_markup=kb_back())
     else:
         await msg.answer(f"❌ Ошибка: {res['data']}", reply_markup=kb_back())
     
     await state.clear()
 
-# Остальные функции
 @dp.callback_query(F.data == "list_acc")
 async def list_acc(call: types.CallbackQuery):
     accs = db_get(call.from_user.id)
@@ -276,7 +292,7 @@ async def delete(call: types.CallbackQuery):
 
 async def main():
     init_db()
-    print("✅ BOT STARTED (EDGE MODE)")
+    print("✅ BOT STARTED (NETHERLANDS MODE)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
