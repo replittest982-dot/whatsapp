@@ -31,13 +31,13 @@ try:
 except:
     ADMIN_ID = 0
 
-# Разрешаем 2 браузера одновременно (чтобы сервер не упал)
+# Разрешаем 2 браузера одновременно
 BROWSER_SEMAPHORE = asyncio.Semaphore(2)
 DB_NAME = 'bot_database.db'
 SESSIONS_DIR = "/app/sessions"
 
 ACTIVE_DRIVERS = {} 
-fake = Faker('ru_RU') # ГЕНЕРАТОР РУССКОГО ТЕКСТА
+fake = Faker('ru_RU')
 
 # Глобальные настройки скорости (по умолчанию 2-5 минут)
 FARM_DELAY_MIN = 120
@@ -73,17 +73,16 @@ def get_driver(phone):
     opt.add_argument("--disable-dev-shm-usage")
     opt.add_argument("--window-size=1366,768")
     
-    # Меняем User-Agent чтобы не палиться
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     opt.add_argument(f"user-agent={ua}")
     opt.add_argument("--log-level=3")
     
-    # СЕССИЯ СОХРАНЯЕТСЯ ТУТ
+    # СЕССИЯ
     opt.add_argument(f"--user-data-dir={os.path.join(SESSIONS_DIR, str(phone))}")
     
     return webdriver.Chrome(service=Service("/usr/local/bin/chromedriver"), options=opt)
 
-# --- ИМИТАЦИЯ ЧЕЛОВЕКА (УНИКАЛЬНЫЙ ТЕКСТ) ---
+# --- ИМИТАЦИЯ ЧЕЛОВЕКА ---
 async def human_type(element, text):
     """Печатает с опечатками"""
     for char in text:
@@ -193,10 +192,17 @@ async def check(call: types.CallbackQuery):
     try:
         scr = await asyncio.to_thread(driver.get_screenshot_as_png)
         code = ""
-        try: code = f"\nКОД: `{driver.find_element(By.XPATH, '//div[@aria-details=\"link-device-phone-number-code\"]').text}`"
+        # ИСПРАВЛЕННЫЙ БЛОК (БЕЗ F-STRING ОШИБКИ)
+        try: 
+            # Используем одинарные кавычки в XPath, чтобы не конфликтовать
+            el = driver.find_element(By.XPATH, "//div[@aria-details='link-device-phone-number-code']")
+            code = f"\nКОД: `{el.text}`"
         except: pass
+        
         await call.message.answer_photo(BufferedInputFile(scr, "s.png"), caption=f"Экран{code}", parse_mode="Markdown")
-    except: await call.answer("Ошибка фото")
+    except Exception as e: 
+        logger.error(f"Screenshot error: {e}")
+        await call.answer("Ошибка фото")
 
 @dp.callback_query(F.data == "force_link")
 async def f_link(call: types.CallbackQuery):
@@ -233,7 +239,7 @@ async def done(call: types.CallbackQuery, state: FSMContext):
         ACTIVE_DRIVERS.pop(call.from_user.id).quit()
     
     await call.message.answer(f"✅ {phone} добавлен! Первый прогрев уже идет.")
-    asyncio.create_task(single_warmup(phone)) # Мгновенный пинок
+    asyncio.create_task(single_warmup(phone))
 
 @dp.callback_query(F.data == "list")
 async def list_a(call: types.CallbackQuery):
@@ -246,12 +252,10 @@ async def list_a(call: types.CallbackQuery):
 
 # --- ЯДРО ПРОГРЕВА ---
 async def single_warmup(sender):
-    """Шлет одно сообщение мгновенно"""
     await asyncio.sleep(5)
     accs = db_get_active()
     if len(accs) < 2: return
     
-    # Выбор получателя
     targets = [a[0] for a in accs if a[0] != sender]
     if not targets: return
     receiver = random.choice(targets)
@@ -265,13 +269,11 @@ async def perform_msg(sender, receiver):
             logger.info(f"MSG START: {sender} -> {receiver}")
             driver = await asyncio.to_thread(get_driver, sender)
             
-            # Прямая ссылка на чат
             driver.get(f"https://web.whatsapp.com/send?phone={receiver}")
             
             wait = WebDriverWait(driver, 60)
             inp = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@contenteditable='true'][@data-tab='10']")))
             
-            # УНИКАЛЬНЫЙ ТЕКСТ (Faker)
             text = fake.sentence(nb_words=random.randint(3, 10))
             await human_type(inp, text)
             
