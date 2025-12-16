@@ -1,7 +1,7 @@
 # 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Установка системных зависимостей + ЛОКАЛИ И ВРЕМЯ
+# 2. Установка системных зависимостей + ЛОКАЛИ
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl unzip gnupg ca-certificates jq tzdata locales \
     libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
-# Настройка времени на Европу (Амстердам), раз ты меняешь сервер на Нидерланды
+# Время и локаль (Нидерланды для маскировки)
 ENV TZ=Europe/Amsterdam
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
@@ -24,12 +24,12 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Умная установка драйвера
+# 4. Драйвер
 RUN CHROME_VER=$(google-chrome --version | awk '{print $3}') \
     && echo "🔥 Installed Chrome: $CHROME_VER" \
     && URL="https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VER/linux64/chromedriver-linux64.zip" \
     && wget -q -O /tmp/chromedriver.zip "$URL" \
-    || (echo "⚠️ Exact version not found, finding closest match..." \
+    || (echo "Finding closest match..." \
         && MAJOR=$(echo $CHROME_VER | cut -d. -f1) \
         && LATEST_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json" | jq -r ".milestones.\"$MAJOR\".downloads.chromedriver[] | select(.platform == \"linux64\") | .url") \
         && wget -q -O /tmp/chromedriver.zip "$LATEST_URL") \
@@ -38,7 +38,10 @@ RUN CHROME_VER=$(google-chrome --version | awk '{print $3}') \
     && chmod +x /usr/local/bin/chromedriver \
     && rm -rf /tmp/chromedriver.zip /usr/local/bin/chromedriver-linux64
 
-# 5. Финал
+# 5. Создаем папку для сессий
+RUN mkdir -p /app/sessions
+
+# 6. Финал
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
