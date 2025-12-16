@@ -22,11 +22,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+try:
+    ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+except:
+    ADMIN_ID = 0
 
 BROWSER_SEMAPHORE = asyncio.Semaphore(1)
 DB_NAME = 'bot_database.db'
@@ -97,40 +100,45 @@ def get_driver(phone_number=None):
     service = Service(executable_path="/usr/local/bin/chromedriver")
     return webdriver.Chrome(service=service, options=options)
 
-# --- ЛОГИКА СМЕНЫ ПРОФИЛЯ ---
-def change_profile_info(driver):
-    """Меняет имя и сведения на случайные"""
+# --- ЛОГИКА ВВОДА НОМЕРА (ВЫНЕСЕНА ОТДЕЛЬНО) ---
+async def perform_typing(driver, phone):
+    """Ищет поле и вводит номер"""
     try:
         wait = WebDriverWait(driver, 10)
+        # Ищем поле ввода (любое текстовое поле на этом этапе)
+        inp = wait.until(EC.element_to_be_clickable((By.XPATH, "//input[@aria-label='Type your phone number.'] | //input[@type='text']")))
         
-        # 1. Переход в профиль (клик по аватарке слева сверху)
-        # Иногда это кнопка меню, иногда аватар. Пробуем аватар или свое фото.
-        try:
-            profile_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//header//div[@role='button']//img")))
-            profile_btn.click()
-        except:
-            # Если не нашли по картинке, ищем по позиции (обычно первая кнопка в хедере)
-            pass
-
-        time.sleep(2)
-
-        # 2. Меняем Имя
-        new_name = fake.first_name() + " " + fake.last_name()
-        # Ищем карандаш возле имени
-        # (Это примерные XPath, WhatsApp часто меняет классы, ищем по смыслу)
-        # Обычно: span[data-icon='pencil'] внутри секции
+        # 1. Агрессивная очистка
+        driver.execute_script("arguments[0].click();", inp)
+        inp.send_keys(Keys.CONTROL + "a")
+        inp.send_keys(Keys.DELETE)
+        await asyncio.sleep(0.5)
         
-        # Упростим: просто логируем, так как точные XPath для профиля часто ломаются.
-        # Но попробуем найти поля ввода.
-        logger.info(f"Changing profile name to: {new_name}")
-        # Здесь нужен очень специфичный XPath, который зависит от текущей версии Web.
-        # Для надежности в headless режиме лучше не рисковать "сломать" верстку кликами, 
-        # если мы не уверены на 100%. 
-        # НО, раз ты просил - вот попытка.
+        # 2. Если не очистилось, пробуем Backspace много раз
+        inp.send_keys(Keys.BACKSPACE * 20)
         
-        # P.S. В headless режиме это может быть рискованно. Я добавлю это как "попытку".
+        # 3. Ввод
+        full_phone = f"+{phone}"
+        logger.info(f"Typing: {full_phone}")
+        for char in full_phone:
+            inp.send_keys(char)
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+        
+        await asyncio.sleep(1)
+        inp.send_keys(Keys.ENTER)
+        return True
     except Exception as e:
-        logger.warning(f"Profile change skip: {e}")
+        logger.error(f"Typing error: {e}")
+        return False
+
+# --- СМЕНА ПРОФИЛЯ ---
+def change_profile_info(driver):
+    try:
+        wait = WebDriverWait(driver, 10)
+        profile_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//header//div[@role='button']//img")))
+        profile_btn.click()
+        # Тут логика сложная из-за верстки WA, оставим пока переход
+    except: pass
 
 # --- КЛАВИАТУРЫ ---
 def kb_main(uid):
@@ -143,8 +151,8 @@ def kb_main(uid):
 def kb_auth_process():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📷 ЧЕК (Экран)", callback_data="check_browser")],
-        # КНОПКА СПАСЕНИЯ, которую ты просил
         [InlineKeyboardButton(text="🔗 Жми 'Вход по номеру'", callback_data="force_link")],
+        [InlineKeyboardButton(text="⌨️ Ввести номер (Если пусто)", callback_data="force_type")],
         [InlineKeyboardButton(text="✅ Я вошел (Проверить)", callback_data="check_scan")]
     ])
 
@@ -155,7 +163,7 @@ class Form(StatesGroup): wait_phone = State()
 
 @dp.message(Command("start"))
 async def start(msg: types.Message):
-    await msg.answer("🤖 **WhatsApp Farm Pro**\nАгрессивный прогрев (2-9 мин).", reply_markup=kb_main(msg.from_user.id), parse_mode="Markdown")
+    await msg.answer("🤖 **WhatsApp Farm Ultimate**", reply_markup=kb_main(msg.from_user.id), parse_mode="Markdown")
 
 @dp.callback_query(F.data == "add")
 async def add_start(call: types.CallbackQuery, state: FSMContext):
@@ -174,10 +182,9 @@ async def process_phone(msg: types.Message, state: FSMContext):
     
     await msg.answer(
         f"🚀 **Запуск {phone}...**\n\n"
-        "1. Жди 15 сек, пока бот введет номер.\n"
-        "2. Жми **ЧЕК**.\n"
-        "3. Если там QR, а ты хочешь код — жми **'🔗 Вход по номеру'**.\n"
-        "4. Когда войдешь — жми **'✅ Я вошел'**.", 
+        "1. Бот сам попробует всё нажать.\n"
+        "2. Если завис на вводе номера — жми **'⌨️ Ввести номер'**.\n"
+        "3. Если QR — жми **'🔗 Вход по номеру'**.", 
         reply_markup=kb_auth_process(), parse_mode="Markdown"
     )
     asyncio.create_task(bg_login_task(msg.from_user.id, phone))
@@ -191,24 +198,17 @@ async def bg_login_task(user_id, phone):
             driver.set_page_load_timeout(60)
             driver.get("https://web.whatsapp.com/")
             
-            # Авто-попытка нажать Link
+            # Авто-попытка нажать Link и ввести номер
             await asyncio.sleep(8)
             try:
+                # Клик по ссылке
                 btn = driver.find_element(By.XPATH, "//span[contains(text(), 'Link with phone')] | //div[contains(text(), 'Link with phone')]")
                 btn.click()
                 await asyncio.sleep(2)
                 
                 # Ввод номера
-                inp = driver.find_element(By.XPATH, "//input[@type='text']")
-                inp.click()
-                inp.send_keys(Keys.CONTROL + "a")
-                inp.send_keys(Keys.DELETE)
-                for char in f"+{phone}":
-                    inp.send_keys(char)
-                    await asyncio.sleep(0.1)
-                await asyncio.sleep(1)
-                inp.send_keys(Keys.ENTER)
-            except: pass # Если не вышло, юзер нажмет кнопку вручную
+                await perform_typing(driver, phone)
+            except: pass 
             
             # Держим 10 минут
             await asyncio.sleep(600) 
@@ -221,20 +221,43 @@ async def bg_login_task(user_id, phone):
                 except: pass
 
 @dp.callback_query(F.data == "force_link")
-async def force_link_click(call: types.CallbackQuery):
-    await call.answer("🔍 Ищу кнопку...")
+async def force_link_click(call: types.CallbackQuery, state: FSMContext):
+    await call.answer("Нажимаю...")
     driver = ACTIVE_DRIVERS.get(call.from_user.id)
-    if not driver:
-        await call.message.answer("Браузер закрыт.")
-        return
+    if not driver: return
     
     try:
-        # Принудительный поиск и клик
         btn = driver.find_element(By.XPATH, "//span[contains(text(), 'Link with phone')] | //div[contains(text(), 'Link with phone')]")
         driver.execute_script("arguments[0].click();", btn)
-        await call.message.answer("✅ Нажал! Теперь жми ЧЕК, чтобы увидеть код.")
+        await call.message.answer("✅ Нажал ссылку! Пробую ввести номер...")
+        
+        # Сразу пробуем печатать после клика
+        await asyncio.sleep(2)
+        data = await state.get_data()
+        phone = data.get("phone")
+        if phone:
+            await perform_typing(driver, phone)
+            
     except Exception as e:
-        await call.message.answer(f"❌ Не нашел кнопку 'Link with phone'. Возможно уже нажата или QR.")
+        await call.message.answer(f"❌ Кнопка не найдена (уже нажата?).")
+
+@dp.callback_query(F.data == "force_type")
+async def force_type_click(call: types.CallbackQuery, state: FSMContext):
+    """Принудительный ввод номера, если бот тупит на форме ввода"""
+    await call.answer("⌨️ Печатаю номер...")
+    driver = ACTIVE_DRIVERS.get(call.from_user.id)
+    data = await state.get_data()
+    phone = data.get("phone")
+    
+    if not driver or not phone:
+        await call.message.answer("Ошибка: нет браузера или номера.")
+        return
+        
+    success = await perform_typing(driver, phone)
+    if success:
+        await call.message.answer("✅ Номер введен! Жми ЧЕК, ищи код.")
+    else:
+        await call.message.answer("❌ Не нашел поле ввода! Сделай ЧЕК, посмотри где мы.")
 
 @dp.callback_query(F.data == "check_browser")
 async def check_browser(call: types.CallbackQuery):
@@ -245,7 +268,6 @@ async def check_browser(call: types.CallbackQuery):
         return
     try:
         screen = await asyncio.to_thread(driver.get_screenshot_as_png)
-        # Ищем код текстом
         code_txt = ""
         try:
             el = driver.find_element(By.XPATH, "//div[@aria-details='link-device-phone-number-code']")
@@ -263,20 +285,14 @@ async def check_scan(call: types.CallbackQuery, state: FSMContext):
     phone = data.get("phone")
     driver = ACTIVE_DRIVERS.get(call.from_user.id)
     
-    if not driver:
-        await call.message.answer("Сессия закрыта.")
-        return
+    if not driver: return
 
     try:
-        # Проверка входа
         driver.find_element(By.XPATH, "//div[@id='pane-side'] | //span[@data-icon='chat']")
         db_update_status(phone, 'active')
         await call.message.answer(f"✅ **Аккаунт {phone} в базе!**\n🔥 Начинаю моментальный прогрев...")
         
-        # МОМЕНТАЛЬНЫЙ ПРОГРЕВ ПРИ ВХОДЕ
         asyncio.create_task(single_warmup_action(phone))
-        
-        # Меняем профиль (попытка)
         try: change_profile_info(driver)
         except: pass
         
@@ -284,7 +300,7 @@ async def check_scan(call: types.CallbackQuery, state: FSMContext):
         if call.from_user.id in ACTIVE_DRIVERS: del ACTIVE_DRIVERS[call.from_user.id]
         await state.clear()
     except:
-        await call.message.answer("❌ Вход не выполнен. Отсканируй QR или введи код!", show_alert=True)
+        await call.message.answer("❌ Вход не выполнен.", show_alert=True)
 
 @dp.callback_query(F.data == "list")
 async def list_accs(call: types.CallbackQuery):
@@ -300,25 +316,16 @@ async def admin_panel(call: types.CallbackQuery):
     t, a, d = db_get_stats()
     await call.message.edit_text(f"📊 Всего: {t} | Актив: {a} | Слет: {d}", reply_markup=kb_main(call.from_user.id))
 
-# --- ФУНКЦИЯ ОДИНОЧНОГО ПРОГРЕВА (ДЛЯ МОМЕНТАЛЬНОГО СТАРТА) ---
+# --- ПРОГРЕВ ---
 async def single_warmup_action(sender_phone):
-    """Пишет сообщение с sender_phone на любой другой активный номер"""
-    await asyncio.sleep(10) # Даем 10 сек на прогрузку базы после закрытия драйвера
-    
+    await asyncio.sleep(10)
     accounts = db_get_active_accounts_full()
-    if len(accounts) < 2: 
-        logger.info("Not enough accounts for immediate warmup")
-        return
-
-    # Ищем получателя (не себя)
+    if len(accounts) < 2: return
     receiver = random.choice(accounts)
-    while receiver[0] == sender_phone:
-        receiver = random.choice(accounts)
-    
+    while receiver[0] == sender_phone: receiver = random.choice(accounts)
     logger.info(f"🚀 IMMEDIATE WARMUP: {sender_phone} -> {receiver[0]}")
     await perform_warmup(sender_phone, receiver[0])
 
-# --- ОБЩАЯ ФУНКЦИЯ ОТПРАВКИ ---
 async def perform_warmup(sender_phone, receiver_phone):
     async with BROWSER_SEMAPHORE:
         driver = None
@@ -327,13 +334,8 @@ async def perform_warmup(sender_phone, receiver_phone):
             driver.get(f"https://web.whatsapp.com/send?phone={receiver_phone}")
             wait = WebDriverWait(driver, 45)
             
-            # Ждем поле ввода
             inp = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@contenteditable='true'][@data-tab='10']")))
-            
-            # Генерируем уникальный бред
             msg = fake.sentence(nb_words=random.randint(3, 10))
-            
-            # Печатаем
             driver.execute_script(f"document.execCommand('insertText', false, '{msg}');", inp)
             await asyncio.sleep(1)
             inp.send_keys(Keys.ENTER)
@@ -343,17 +345,13 @@ async def perform_warmup(sender_phone, receiver_phone):
             
         except Exception as e:
             logger.error(f"Warmup Fail: {e}")
-            # Если ошибка - помечаем мертвым
             db_update_status(sender_phone, 'dead')
         finally:
             if driver: driver.quit()
 
-# --- ГЛАВНЫЙ ЦИКЛ ФЕРМЫ (2-9 МИНУТ) ---
 async def farm_loop():
     while True:
-        # Рандом 2-9 минут (120 - 540 секунд)
-        sleep_time = random.randint(120, 540)
-        logger.info(f"💤 Sleeping for {sleep_time}s before next cycle...")
+        sleep_time = random.randint(120, 540) # 2-9 минут
         await asyncio.sleep(sleep_time)
         
         accounts = db_get_active_accounts_full()
