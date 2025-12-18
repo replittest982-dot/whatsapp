@@ -24,12 +24,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
 
-# --- КОНФИГ ---
+# --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN") 
 
-# НИКАКИХ ADMIN_ID. ДОСТУП ОТКРЫТ ВСЕМ.
-# ЛИМИТЫ:
-BROWSER_SEMAPHORE = asyncio.Semaphore(3) # Макс 3 окна одновременно (чтобы сервер не упал)
+# ЛИМИТЫ (Важно для 150 аккаунтов на BotHost)
+BROWSER_SEMAPHORE = asyncio.Semaphore(3) # Максимум 3 браузера одновременно
 
 DB_NAME = 'bot_database.db'
 SESSIONS_DIR = "./sessions"
@@ -37,22 +36,22 @@ LOG_DIR = "./logs"
 BAN_DIR = "./logs/bans"
 
 CONFIG = {
-    "mode": "MASS",     # MASS = Переписка между аккаунтами
-    "speed": "NORMAL",  # Скорость фарма
-    "min_delay": 120,
-    "max_delay": 300
+    "mode": "MASS",     # MASS = Переписка между аккаунтами (прогрев)
+    "speed": "NORMAL",  # Скорость
+    "min_delay": 120,   # Мин задержка (сек)
+    "max_delay": 400    # Макс задержка (сек)
 }
 
 ACTIVE_SESSIONS = {} 
 fake = Faker('ru_RU')
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
-logger = logging.getLogger("WA_PUBLIC")
+logger = logging.getLogger("WA_UNLOCKED")
 
-# --- БАЗА ДАННЫХ ---
+# --- БАЗА ДАННЫХ (WAL Mode - Быстро и надежно) ---
 def init_db():
     with sqlite3.connect(DB_NAME, timeout=30) as conn:
-        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA journal_mode=WAL;") # Важно для многопотока
         conn.execute('''CREATE TABLE IF NOT EXISTS accounts 
                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                          user_id INTEGER, 
@@ -103,16 +102,18 @@ def is_memory_safe():
     except: return True
 
 async def zombie_killer():
+    """Убивает зависшие процессы Chrome раз в 2 минуты"""
     while True:
         await asyncio.sleep(120)
         for proc in psutil.process_iter(['pid', 'name', 'create_time']):
             try:
                 if 'chrome' in proc.info['name']:
+                    # Если процесс живет дольше 30 минут - убиваем
                     if (datetime.now().timestamp() - proc.info['create_time']) > 1800:
                         proc.kill()
             except: pass
 
-# --- SELENIUM ---
+# --- SELENIUM UTILS ---
 async def find_element_retry(driver, xpaths, timeout=10):
     wait = WebDriverWait(driver, timeout)
     for xp in xpaths:
@@ -121,7 +122,6 @@ async def find_element_retry(driver, xpaths, timeout=10):
     return None
 
 def get_driver(phone):
-    # ПРОВЕРКА ПАМЯТИ
     if not is_memory_safe(): return None
     
     path = os.path.join(SESSIONS_DIR, str(phone))
@@ -131,6 +131,7 @@ def get_driver(phone):
     if acc and acc[5]:
         ua, res, plat = acc[5], acc[6], acc[7]
     else:
+        # Генерация отпечатка
         ua = f"Mozilla/5.0 ({random.choice(['Windows NT 10.0; Win64; x64', 'Macintosh; Intel Mac OS X 10_15_7'])}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         res, plat = "1920,1080", "Win32"
         with sqlite3.connect(DB_NAME) as conn:
@@ -146,6 +147,7 @@ def get_driver(phone):
     opt.add_argument(f"--user-data-dir={path}")
     opt.page_load_strategy = 'eager'
     
+    # STEALTH
     opt.add_argument("--disable-blink-features=AutomationControlled")
     opt.add_experimental_option("excludeSwitches", ["enable-automation"])
     opt.add_experimental_option('useAutomationExtension', False)
@@ -174,22 +176,22 @@ def kb_main():
     mode = "👤 Solo" if CONFIG['mode'] == "SOLO" else "👥 Mass"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить Аккаунт", callback_data="add")],
-        [InlineKeyboardButton(text="📂 Управление Фермой", callback_data="list")],
+        [InlineKeyboardButton(text="📂 Ферма (Список)", callback_data="list")],
         [InlineKeyboardButton(text=f"Режим: {mode}", callback_data="toggle_mode")],
-        [InlineKeyboardButton(text="📊 Статус Сервера", callback_data="stats")]
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
     ])
 
-# !!! УБРАНА ПРОВЕРКА ADMIN_ID. ПУСКАЕТ ВСЕХ !!!
+# !!! САМОЕ ГЛАВНОЕ: УБРАНЫ ПРОВЕРКИ ADMIN_ID. РАБОТАЕТ ДЛЯ ВСЕХ !!!
 @dp.message(Command("start"))
 async def start(msg: types.Message):
     init_db()
     for d in [SESSIONS_DIR, LOG_DIR, BAN_DIR]:
         if not os.path.exists(d): os.makedirs(d)
-    await msg.answer("🔥 **WA Farm Public**\nДоступ открыт для всех.", reply_markup=kb_main())
+    await msg.answer("🔥 **WA Farm Unlocked**\nДоступ открыт для всех. Жми кнопки.", reply_markup=kb_main())
 
 @dp.callback_query(F.data == "add")
 async def add_start(call: types.CallbackQuery, state: FSMContext):
-    await call.message.edit_text("Введи номер телефона (только цифры):")
+    await call.message.edit_text("Введи номер телефона (только цифры, например 79001234567):")
     await state.set_state(Form.phone)
 
 @dp.message(Form.phone)
@@ -198,76 +200,77 @@ async def add_phone(msg: types.Message, state: FSMContext):
     with sqlite3.connect(DB_NAME) as conn:
         conn.execute("INSERT OR IGNORE INTO accounts (user_id, phone_number) VALUES (?, ?)", (msg.from_user.id, phone))
     
-    await msg.answer(f"🚀 Запускаю браузер для **{phone}**...\nЭто может занять 15-20 сек. Жди скрин.", reply_markup=None)
-    # Запускаем процесс и не блокируем бота
+    await msg.answer(f"🚀 Запускаю браузер для **{phone}**...\nПодожди 10-15 сек, я пришлю скриншот.", reply_markup=None)
+    # Запуск фонового процесса настройки
     asyncio.create_task(auth_session_start(msg.chat.id, phone))
 
 async def auth_session_start(chat_id, phone):
+    # Используем семафор, чтобы не убить сервер
     async with BROWSER_SEMAPHORE:
-        # Пробуем получить драйвер
         driver = await asyncio.to_thread(get_driver, phone)
-        
-        # ЕСЛИ ДРАЙВЕР НЕ ОТКРЫЛСЯ (МАЛО ПАМЯТИ ИЛИ ОШИБКА)
         if not driver: 
-            await bot.send_message(chat_id, "❌ **Ошибка:** Сервер перегружен или мало памяти. Попробуй через минуту.")
+            await bot.send_message(chat_id, "❌ **Ошибка:** Не удалось открыть браузер (мало памяти).")
             return
 
         ACTIVE_SESSIONS[phone] = driver
         try:
             driver.get("https://web.whatsapp.com/")
-            await asyncio.sleep(8) 
+            await asyncio.sleep(10) # Ждем загрузки страницы
             
+            # Меню управления входом
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔗 Ввести номер (Авто)", callback_data=f"do_link_{phone}")],
                 [InlineKeyboardButton(text="📷 Показать QR", callback_data=f"do_qr_{phone}")],
                 [InlineKeyboardButton(text="🔄 Обновить скрин", callback_data=f"do_scr_{phone}")]
             ])
             
+            # Шлем скриншот, чтобы ты видел, что происходит
             try:
                 scr = driver.get_screenshot_as_png()
                 await bot.send_photo(chat_id, BufferedInputFile(scr, "start.png"), 
-                                   caption=f"✅ Браузер для {phone} готов.\nВыбери действие:", reply_markup=kb)
+                                   caption=f"✅ Браузер для {phone} открыт.\nВыбери метод входа:", reply_markup=kb)
             except:
-                await bot.send_message(chat_id, "⚠️ Браузер открыт, но скрин не сделался. Жми 'Обновить скрин'.", reply_markup=kb)
+                await bot.send_message(chat_id, "⚠️ Браузер открыт, но скрин не сделался. Попробуй нажать кнопки.", reply_markup=kb)
             
-            # Ждем авторизации 5 минут
+            # Ждем 5 минут, проверяя вход
             for _ in range(60):
+                # Если появился список чатов
                 if driver.find_elements(By.ID, "pane-side"):
                     db_update_status(phone, "active")
-                    await bot.send_message(chat_id, f"✅ **{phone}** УСПЕШНО ДОБАВЛЕН!\nБот начнет прогрев сам.")
+                    await bot.send_message(chat_id, f"✅ **{phone}** УСПЕШНО АВТОРИЗОВАН!\nАккаунт добавлен в базу и начнет работу.")
                     return
                 await asyncio.sleep(5)
                 
         except Exception as e:
             logger.error(f"Auth error: {e}")
-            await bot.send_message(chat_id, "💥 Браузер упал. Попробуй снова.")
+            await bot.send_message(chat_id, "💥 Браузер вылетел.")
         finally:
             if phone in ACTIVE_SESSIONS: del ACTIVE_SESSIONS[phone]
             try: driver.quit()
             except: pass
 
-# --- UI ACTIONS ---
+# --- UI ДЕЙСТВИЯ (ВИЗУАЛЬНЫЙ ВХОД) ---
 @dp.callback_query(F.data.startswith("do_scr_"))
 async def refresh_screen(call: types.CallbackQuery):
     phone = call.data.split("_")[2]
     driver = ACTIVE_SESSIONS.get(phone)
     if driver:
-        await send_screen(driver, call.message.chat.id, "Свежий скрин:")
+        await send_screen(driver, call.message.chat.id, "Обновление экрана:")
         await call.answer()
     else:
-        await call.answer("Браузер закрылся (таймаут)", show_alert=True)
+        await call.answer("Браузер закрылся по тайм-ауту", show_alert=True)
 
 @dp.callback_query(F.data.startswith("do_qr_"))
 async def show_qr(call: types.CallbackQuery):
     phone = call.data.split("_")[2]
     driver = ACTIVE_SESSIONS.get(phone)
     if driver:
-        await call.message.answer("Ищу QR...")
+        await call.message.answer("Ищу QR код...")
         try:
             canvas = driver.find_element(By.TAG_NAME, "canvas")
             await send_screen(driver, call.message.chat.id, "Сканируй QR телефоном!")
         except:
-            await send_screen(driver, call.message.chat.id, "QR не виден. WA мог сменить вид. Используй Вход по номеру.")
+            await send_screen(driver, call.message.chat.id, "QR не найден. WA мог сменить верстку или ты уже вошел.")
     else:
         await call.answer("Браузер закрыт")
 
@@ -277,39 +280,42 @@ async def do_link_number(call: types.CallbackQuery):
     driver = ACTIVE_SESSIONS.get(phone)
     if not driver: return await call.answer("Браузер закрыт")
     
-    await call.answer("Ввожу номер...")
+    await call.answer("Пытаюсь нажать и ввести...")
     try:
-        # 1. Жмем Link
+        # 1. Жмем Link with phone
         btn = await find_element_retry(driver, ["//span[contains(text(), 'Link with phone')]", "//a[contains(@href, 'link-device')]", "//span[contains(text(), 'Связать с номером')]"], 5)
         if btn:
             btn.click()
             await asyncio.sleep(2)
         
-        # 2. Поле
+        # 2. Ищем поле ввода
         inp = await find_element_retry(driver, ["//input[@aria-label='Type your phone number.']", "//input[@type='text']"], 5)
         if inp:
+            # Чистим JS-ом
             driver.execute_script("arguments[0].value = '';", inp)
             inp.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
+            # Вводим
             for ch in phone: inp.send_keys(ch); await asyncio.sleep(0.05)
             inp.send_keys(Keys.ENTER)
             
-            # 3. Код
+            # 3. Ждем код
             await asyncio.sleep(3)
             code_el = await find_element_retry(driver, ["//div[@aria-details='link-device-phone-number-code']"], 15)
             
             scr = driver.get_screenshot_as_png()
-            txt = f"🔑 КОД: {code_el.text}" if code_el else "❌ Код не прогрузился. Попробуй еще раз или через QR."
+            txt = f"🔑 КОД: {code_el.text}" if code_el else "❌ Код не появился. Глянь скрин, мб ошибка."
             await bot.send_photo(call.message.chat.id, BufferedInputFile(scr, "code.png"), caption=txt)
         else:
             await send_screen(driver, call.message.chat.id, "Не нашел поле ввода! См. скрин.")
             
     except Exception as e:
-        await call.message.answer(f"Ошибка ввода: {e}")
+        await call.message.answer(f"Ошибка: {e}")
 
-# --- FARM WORKER ---
+# --- FARM WORKER (PLATINUM LOGIC) ---
 async def worker_cycle(phone, force_action=None):
     if not is_memory_safe(): return
     
+    # Ночной режим (Спим с 23 до 07, если не пнули принудительно)
     if not force_action:
         h = datetime.now().hour
         if (h >= 23 or h < 7) and random.random() < 0.95: return
@@ -323,6 +329,8 @@ async def worker_cycle(phone, force_action=None):
         
         try:
             driver.get("https://web.whatsapp.com/")
+            
+            # Ждем чаты
             loaded = await find_element_retry(driver, ["//div[@id='pane-side']"], 60)
             
             if not loaded:
@@ -336,21 +344,25 @@ async def worker_cycle(phone, force_action=None):
 
             db_update_status(phone, 'active')
 
+            # Обработка Force Actions
             if force_action == "screenshot":
                 await asyncio.sleep(2); return 
             if force_action == "msg":
                  await send_msg_selenium(driver, phone, phone, "Check")
                  return
 
-            # Фарм
+            # Фарм Логика
             acc = db_get_acc(phone)
+            # Если профиль не настроен - настраиваем
             if acc[9] == 0: await change_profile(driver, phone)
             
             actives = db_get_all_active()
             target = phone
             is_solo = True
+            
+            # Если режим MASS и есть другие акки - пишем им
             if CONFIG['mode'] == "MASS" and len(actives) > 1:
-                if random.random() < 0.8:
+                if random.random() < 0.8: # 80% шанс писать другому
                     cand = [x for x in actives if x != phone]
                     if cand: target = random.choice(cand); is_solo = False
             
@@ -377,8 +389,10 @@ async def send_msg_selenium(driver, sender, target, mode):
 
 async def change_profile(driver, phone):
     try:
+        # Клик по аватарке
         driver.find_element(By.XPATH, "//header//img").click()
         await asyncio.sleep(2)
+        # Клик по карандашу имени
         driver.find_element(By.XPATH, "//span[@data-icon='pencil']").click()
         act = driver.switch_to.active_element
         act.send_keys(Keys.CONTROL + "a" + Keys.BACKSPACE)
@@ -394,8 +408,10 @@ async def farm_scheduler():
         if phones:
             p = random.choice(phones)
             asyncio.create_task(worker_cycle(p))
+        
+        # Задержка между запусками
         d = random.randint(CONFIG['min_delay'], CONFIG['max_delay'])
-        if datetime.now().hour >= 23: d *= 3
+        if datetime.now().hour >= 23: d *= 3 # Ночью реже
         await asyncio.sleep(d)
 
 # --- MENUS ---
