@@ -1,7 +1,7 @@
 # 1. Базовый образ
 FROM python:3.11-slim
 
-# 2. Установка системных зависимостей + ЛОКАЛИ И ВРЕМЯ
+# 2. Установка системных зависимостей
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget curl unzip gnupg ca-certificates jq tzdata locales \
     libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
@@ -24,13 +24,11 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Умная установка драйвера (Твой рабочий скрипт)
+# 4. Умная установка драйвера
 RUN CHROME_VER=$(google-chrome --version | awk '{print $3}') \
-    && echo "🔥 Installed Chrome: $CHROME_VER" \
     && URL="https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VER/linux64/chromedriver-linux64.zip" \
     && wget -q -O /tmp/chromedriver.zip "$URL" \
-    || (echo "⚠️ Exact version not found, finding closest match..." \
-        && MAJOR=$(echo $CHROME_VER | cut -d. -f1) \
+    || (MAJOR=$(echo $CHROME_VER | cut -d. -f1) \
         && LATEST_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json" | jq -r ".milestones.\"$MAJOR\".downloads.chromedriver[] | select(.platform == \"linux64\") | .url") \
         && wget -q -O /tmp/chromedriver.zip "$LATEST_URL") \
     && unzip -o /tmp/chromedriver.zip -d /usr/local/bin/ \
@@ -38,19 +36,20 @@ RUN CHROME_VER=$(google-chrome --version | awk '{print $3}') \
     && chmod +x /usr/local/bin/chromedriver \
     && rm -rf /tmp/chromedriver.zip /usr/local/bin/chromedriver-linux64
 
-# 5. Финал (ТУТ БЫЛА ОШИБКА, Я ИСПРАВИЛ НА ТВОЕ ИМЯ ФАЙЛА)
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем ИМЕННО wa_final_bot.py, так как он у тебя так называется
+# Копируем твой основной файл
+# ВНИМАНИЕ: Если ты переименовал его обратно в main.py, измени здесь!
 COPY wa_final_bot.py .
 
-# Создаем папку для сессий (Обязательно для нового кода!)
-RUN mkdir -p /app/sessions
+# Создаем папки для сессий и временных данных
+RUN mkdir -p /app/sessions /app/tmp_chrome_data
 
-ENV CHROME_EXECUTABLE_PATH=/usr/bin/google-chrome
-ENV SHM_SIZE=2g
+# Переменные окружения для стабильности
+ENV CHROME_BIN=/usr/bin/google-chrome
+ENV PYTHONUNBUFFERED=1
 
-# Запускаем именно твой файл
+# Запускаем
 CMD ["python", "wa_final_bot.py"]
