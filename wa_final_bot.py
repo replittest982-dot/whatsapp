@@ -40,13 +40,12 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
 INSTANCE_ID = int(os.getenv("INSTANCE_ID", 1))
 TOTAL_INSTANCES = int(os.getenv("TOTAL_INSTANCES", 1))
 
-# Настройки для BotHost (ограниченные ресурсы)
+# Настройки для BotHost
 BROWSER_SEMAPHORE = asyncio.Semaphore(1) 
 DB_NAME = 'imperator_titanium.db'
 SESSIONS_DIR = os.path.abspath("./sessions")
 TMP_BASE = os.path.abspath("./tmp_chrome_data")
 
-# Режимы прогрева
 HEAT_MODES = {
     "TURBO": (15, 30),
     "MEDIUM": (60, 180),
@@ -54,41 +53,41 @@ HEAT_MODES = {
 }
 CURRENT_MODE = "MEDIUM"
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s | INST-%(INSTANCE)s | %(levelname)s | %(message)s')
+# 🔥 FIX LOGGING ERROR: Вставляем ID прямо в строку формата
+logging.basicConfig(
+    level=logging.INFO, 
+    format=f'%(asctime)s | INST-{INSTANCE_ID} | %(levelname)s | %(message)s'
+)
 logger = logging.getLogger("Imperator")
 fake = Faker('ru_RU')
 
-# Создаем папки при старте
+# Создаем папки
 for d in [SESSIONS_DIR, TMP_BASE]:
     os.makedirs(d, exist_ok=True)
 
-# Глобальный словарь активных драйверов
 ACTIVE_DRIVERS = {}
 
 # ==========================================
-# 🛠 УТИЛИТЫ И СИСТЕМА
+# 🛠 УТИЛИТЫ
 # ==========================================
 
 def find_browser_binary():
-    """Ищет исполняемый файл браузера в системе"""
+    """Ищет браузер. Сначала Chromium, потом Chrome."""
     paths = [
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable"
     ]
-    # Сначала проверяем shutil.which
     chk = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
     if chk: return chk
     
-    # Затем проверяем хардкод пути
     for p in paths:
-        if os.path.exists(p):
-            return p
+        if os.path.exists(p): return p
     return None
 
 def cleanup_zombie():
-    """Убивает зависшие процессы"""
+    """Чистка памяти перед стартом"""
     killed = 0
     for p in psutil.process_iter(['name']):
         if p.info['name'] in ['chromium', 'chromedriver', 'chrome']:
@@ -97,7 +96,6 @@ def cleanup_zombie():
                 killed += 1
             except: pass
     
-    # Чистим временные папки
     if os.path.exists(TMP_BASE):
         try: shutil.rmtree(TMP_BASE, ignore_errors=True)
         except: pass
@@ -107,7 +105,7 @@ def cleanup_zombie():
         logger.info(f"🧹 Zombie Cleanup: {killed} procs killed")
 
 # ==========================================
-# 🗄️ БАЗА ДАННЫХ (SQLite)
+# 🗄️ БАЗА ДАННЫХ
 # ==========================================
 def db_init():
     with sqlite3.connect(DB_NAME) as conn:
@@ -126,17 +124,15 @@ def db_save_acc(phone, ua, res, plat):
                      (phone, ua, res, plat, datetime.now(), datetime.now()))
 
 def db_get_targets():
-    """Распределение нагрузки по инстансам"""
     with sqlite3.connect(DB_NAME) as conn:
-        # Берем только аккаунты, чей rowid совпадает с текущим инстансом
         res = conn.execute(f"SELECT phone FROM accounts WHERE status='active' AND (rowid % {TOTAL_INSTANCES}) = ({INSTANCE_ID}-1)").fetchall()
     return [r[0] for r in res]
 
 # ==========================================
-# 🌐 SELENIUM ENGINE (FIXED)
+# 🌐 SELENIUM ENGINE
 # ==========================================
 def get_driver(phone):
-    # 1. Проверка памяти
+    # 1. Проверка RAM
     mem = psutil.virtual_memory()
     if mem.available / (1024*1024) < 200:
         logger.error("🛑 LOW RAM. Skipping launch.")
@@ -145,19 +141,18 @@ def get_driver(phone):
     # 2. Поиск бинарника
     binary_path = find_browser_binary()
     if not binary_path:
-        logger.critical("❌ CRITICAL: Browser binary NOT found in container!")
+        logger.critical("❌ CRITICAL: Browser binary NOT found!")
         return None, None, None, None, None
 
-    # 3. Конфигурация
+    # 3. Конфиг
     ua_data = random.choice([
         {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "plat": "Win32", "res": "1920,1080"},
         {"ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "plat": "Linux x86_64", "res": "1366,768"}
     ])
 
     options = Options()
-    options.binary_location = binary_path # <--- ВАЖНО: Явно указываем путь
+    options.binary_location = binary_path 
     
-    # Пути профиля
     prof_dir = os.path.join(SESSIONS_DIR, phone)
     tmp_dir = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     os.makedirs(tmp_dir, exist_ok=True)
@@ -165,11 +160,9 @@ def get_driver(phone):
     options.add_argument(f"--user-data-dir={prof_dir}")
     options.add_argument(f"--data-path={tmp_dir}")
     options.add_argument(f"--disk-cache-dir={tmp_dir}")
-    
     options.add_argument(f"--user-agent={ua_data['ua']}")
     options.add_argument(f"--window-size={ua_data['res']}")
     
-    # Оптимизация и скрытие
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -178,21 +171,18 @@ def get_driver(phone):
     options.page_load_strategy = 'eager'
 
     try:
-        # Установка драйвера через менеджер (ChromeType.CHROMIUM важно для Linux)
-        logger.info(f"🛠 Launching Chromium from {binary_path}...")
+        # Авто-установка драйвера
         driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
         service = Service(executable_path=driver_path)
-        
         driver = webdriver.Chrome(options=options, service=service)
         
-        # JS Инъекция (Stealth)
+        # Стелс-инъекция
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": f"""
                 Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});
                 Object.defineProperty(navigator, 'platform', {{get: () => '{ua_data['plat']}'}});
             """
         })
-        
         return driver, ua_data['ua'], ua_data['res'], ua_data['plat'], tmp_dir
     except Exception as e:
         logger.error(f"❌ Driver Init Error: {e}")
@@ -212,19 +202,19 @@ async def start_handler(msg: types.Message):
     if not db_check_perm(msg.from_user.id):
         with sqlite3.connect(DB_NAME) as conn:
             conn.execute("INSERT OR IGNORE INTO whitelist (user_id) VALUES (?)", (msg.from_user.id,))
-        return await msg.answer("🔒 Заявка на доступ отправлена.")
+        return await msg.answer("🔒 Заявка отправлена.")
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить аккаунт", callback_data="add_acc")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
     ])
-    await msg.answer(f"👑 **Imperator Titanium v19.1**\nИнстанс: {INSTANCE_ID}", reply_markup=kb)
+    await msg.answer(f"👑 **Imperator Titanium v19.2**\nИнстанс: {INSTANCE_ID}", reply_markup=kb)
 
 @dp.callback_query(F.data == "stats")
 async def stats_handler(cb: types.CallbackQuery):
     targets = db_get_targets()
     mem = psutil.virtual_memory().percent
-    await cb.message.answer(f"📱 Аккаунтов в работе (Inst {INSTANCE_ID}): {len(targets)}\n🧠 RAM Load: {mem}%")
+    await cb.message.answer(f"📱 Аккаунтов в работе: {len(targets)}\n🧠 RAM Load: {mem}%")
     await cb.answer()
 
 @dp.callback_query(F.data == "add_acc")
@@ -237,13 +227,13 @@ async def process_phone_add(msg: types.Message, state: FSMContext):
     phone = "".join(filter(str.isdigit, msg.text))
     await state.clear()
     
-    status_msg = await msg.answer(f"🚀 Запуск процесса для +{phone}...\n(Это может занять до 30 сек)")
+    status_msg = await msg.answer(f"🚀 Запуск +{phone}...\n(Ждем 20-30 сек)")
     
     async with BROWSER_SEMAPHORE:
         driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
         
         if not driver:
-            return await status_msg.edit_text("❌ Ошибка запуска браузера (см. логи). Возможно, нехватка RAM.")
+            return await status_msg.edit_text("❌ Ошибка запуска (см. логи/RAM).")
         
         ACTIVE_DRIVERS[phone] = {"driver": driver, "tmp": tmp}
         
@@ -251,12 +241,11 @@ async def process_phone_add(msg: types.Message, state: FSMContext):
             await asyncio.to_thread(driver.get, "https://web.whatsapp.com")
             wait = WebDriverWait(driver, 45)
             
-            # Поиск кнопки "Link with phone"
+            # Поиск Link with phone
             try:
                 link_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//span[@role='button'][contains(., 'Link')]")))
                 driver.execute_script("arguments[0].click();", link_btn)
             except:
-                # Если не нашлось по тексту, ищем по структуре
                 driver.execute_script("""
                     const spans = document.querySelectorAll('span[role="button"]');
                     for (const s of spans) {
@@ -266,7 +255,7 @@ async def process_phone_add(msg: types.Message, state: FSMContext):
                     }
                 """)
             
-            # Ввод номера (Nuclear JS Method)
+            # Ввод номера JS
             inp_xpath = "//input[@aria-label='Type your phone number.']"
             try:
                 inp_elem = wait.until(EC.presence_of_element_located((By.XPATH, inp_xpath)))
@@ -279,13 +268,12 @@ async def process_phone_add(msg: types.Message, state: FSMContext):
                 await asyncio.sleep(1)
                 inp_elem.send_keys(Keys.ENTER)
             except:
-                # Fallback если XPath изменился
-                await status_msg.edit_text("❌ Не удалось найти поле ввода номера. WhatsApp обновил верстку?")
+                await status_msg.edit_text("❌ Не удалось найти поле ввода номера.")
                 return
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(6)
             
-            # Получение скриншота с кодом
+            # Скриншот
             png = await asyncio.to_thread(driver.get_screenshot_as_png)
             await status_msg.delete()
             
@@ -293,13 +281,11 @@ async def process_phone_add(msg: types.Message, state: FSMContext):
                 [InlineKeyboardButton(text="✅ Я ВВЕЛ КОД", callback_data=f"finish_{phone}")]
             ])
             await msg.answer_photo(BufferedInputFile(png, "code.png"), caption=f"🔑 Код для +{phone}", reply_markup=kb)
-            
-            # Сохраняем во временную базу
-            db_save_acc(phone, ua, res, plat) # Статус active ставится сразу, но сессию надо додержать
+            db_save_acc(phone, ua, res, plat)
 
         except Exception as e:
             logger.error(f"Add Error: {e}")
-            await status_msg.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+            await status_msg.edit_text(f"❌ Ошибка: {str(e)[:50]}")
             if phone in ACTIVE_DRIVERS:
                 d = ACTIVE_DRIVERS.pop(phone)
                 d['driver'].quit()
@@ -312,10 +298,10 @@ async def finish_setup(cb: types.CallbackQuery):
         d['driver'].quit()
         if d['tmp']: shutil.rmtree(d['tmp'], ignore_errors=True)
     
-    await cb.message.edit_text(f"✅ Аккаунт +{phone} сохранен и добавлен в рой!")
+    await cb.message.edit_text(f"✅ Аккаунт +{phone} сохранен!")
 
 # ==========================================
-# 🐝 HIVE MIND (ФОНОВЫЙ ФАРМ)
+# 🐝 HIVE MIND
 # ==========================================
 async def hive_worker(phone):
     async with BROWSER_SEMAPHORE:
@@ -326,18 +312,16 @@ async def hive_worker(phone):
             await asyncio.to_thread(driver.get, "https://web.whatsapp.com")
             wait = WebDriverWait(driver, 60)
             
-            # Ждем загрузки
             try:
                 wait.until(EC.presence_of_element_located((By.ID, "pane-side")))
             except:
-                logger.warning(f"⚠️ {phone}: Не прогрузился или разлогинен.")
+                logger.warning(f"⚠️ {phone}: Не прогрузился.")
                 return
 
-            # Логика: Писать самому себе в "Заметки" (Self-chat)
+            # Self-chat
             await asyncio.to_thread(driver.get, f"https://web.whatsapp.com/send?phone={phone}")
             inp = wait.until(EC.presence_of_element_located((By.XPATH, "//div[@contenteditable='true'][@data-tab='10']")))
             
-            # Human Typing
             text = fake.sentence()
             for char in text:
                 inp.send_keys(char)
@@ -354,25 +338,22 @@ async def hive_worker(phone):
             if tmp and os.path.exists(tmp): shutil.rmtree(tmp, ignore_errors=True)
 
 async def hive_loop():
-    logger.info("🐝 HIVE MIND ЗАПУЩЕН")
+    logger.info("🐝 HIVE MIND STARTED")
     while True:
         try:
-            targets = db_get_targets() # Получаем свои цели
+            targets = db_get_targets()
             if not targets:
                 await asyncio.sleep(60)
                 continue
             
-            # Перемешиваем и работаем
             random.shuffle(targets)
             for phone in targets:
-                if phone not in ACTIVE_DRIVERS: # Не трогаем тех, кто сейчас логинится
+                if phone not in ACTIVE_DRIVERS:
                     await hive_worker(phone)
-                    # Пауза между аккаунтами
                     await asyncio.sleep(random.randint(30, 90))
             
-            # Глобальная пауза цикла
             delay = random.randint(*HEAT_MODES[CURRENT_MODE])
-            logger.info(f"💤 Цикл завершен. Сон {delay}с...")
+            logger.info(f"💤 Сон {delay}с...")
             await asyncio.sleep(delay)
             
         except Exception as e:
@@ -385,11 +366,8 @@ async def hive_loop():
 async def main():
     cleanup_zombie()
     db_init()
-    
-    # Запускаем фарм в фоне
     asyncio.create_task(hive_loop())
-    
-    logger.info(f"🚀 IMPERATOR STARTED on Inst-{INSTANCE_ID}")
+    logger.info(f"🚀 IMPERATOR STARTED (Inst-{INSTANCE_ID})")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
