@@ -28,7 +28,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v18.5 (IRONCLAD)
+# ⚙️ КОНФИГУРАЦИЯ v18.6 (BLOODHOUND FIX)
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -73,6 +73,31 @@ ACTIVE_DRIVERS = {}
 class BotStates(StatesGroup):
     waiting_phone = State()
     waiting_vip_id = State()
+
+# ==========================================
+# 🔍 ФУНКЦИЯ-ИЩЕЙКА ДРАЙВЕРА
+# ==========================================
+def find_system_driver():
+    """Ищет chromedriver во всех возможных системных папках"""
+    # 1. Спрашиваем систему (PATH)
+    path = shutil.which("chromedriver") or shutil.which("chromium-driver")
+    if path: return path
+
+    # 2. Проверяем популярные места Debian/Ubuntu
+    common_paths = [
+        "/usr/bin/chromedriver",
+        "/usr/bin/chromium-driver",
+        "/usr/lib/chromium/chromedriver",
+        "/usr/lib/chromium-browser/chromedriver",
+        "/usr/lib/chromium/chromium-driver",
+        "/usr/local/bin/chromedriver"
+    ]
+    
+    for p in common_paths:
+        if os.path.exists(p):
+            return p
+            
+    return None
 
 # ==========================================
 # 🧠 AI ДИАЛОГИ
@@ -152,7 +177,7 @@ def db_set_vip(uid):
     conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE whitelist SET approved=1, is_unlimited=1 WHERE user_id=?", (uid,)); conn.commit(); conn.close()
 
 # ==========================================
-# 🌐 SELENIUM (IRONCLAD DRIVER SETUP)
+# 🌐 SELENIUM (BLOODHOUND SETUP)
 # ==========================================
 def get_driver(phone):
     conn = sqlite3.connect(DB_NAME)
@@ -169,8 +194,9 @@ def get_driver(phone):
     unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     if not os.path.exists(unique_tmp): os.makedirs(unique_tmp)
 
-    # Указываем путь к Chromium
-    options.binary_location = "/usr/bin/chromium"
+    # 1. Ищем бинарник браузера
+    browser_bin = shutil.which("chromium") or "/usr/bin/chromium"
+    options.binary_location = browser_bin
 
     options.add_argument(f"--user-data-dir={prof}")
     options.add_argument(f"--data-path={unique_tmp}")
@@ -188,15 +214,14 @@ def get_driver(phone):
     options.add_argument(f"--user-agent={ua}")
     options.add_argument(f"--window-size={res}")
 
-    # 🔥 ЖЕСТКАЯ ПРИВЯЗКА к драйверу, который мы создали в Dockerfile
-    driver_path = "/usr/bin/chromedriver"
+    # 2. ИЩЕМ ДРАЙВЕР (Умный поиск)
+    driver_path = find_system_driver()
 
-    # ДИАГНОСТИКА: Проверяем, видит ли Python файл
-    if not os.path.exists(driver_path):
-        logger.error(f"❌ PANIC: Driver not found at {driver_path}")
+    if not driver_path:
+        logger.error(f"❌ FATAL: Драйвер не найден ни в одной папке! Проверьте установку.")
         return None, None, None, None, None
-    else:
-        logger.info(f"✅ Driver found: {driver_path}")
+    
+    # logger.info(f"✅ Driver found at: {driver_path}")
 
     try:
         service = Service(executable_path=driver_path)
@@ -267,7 +292,7 @@ async def start(msg: types.Message):
         return await msg.answer("🔒 Заявка отправлена.")
     
     st = "👑 VIP (Безлимит)" if vip else "👤 Юзер"
-    await msg.answer(f"🔱 **Imperator v18.5 (IRONCLAD)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
+    await msg.answer(f"🔱 **Imperator v18.6 (BLOODHOUND)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
 
 @dp.callback_query(F.data.startswith("ap_"))
 async def ap(cb: types.CallbackQuery):
@@ -316,7 +341,7 @@ async def add_p(msg: types.Message, state: FSMContext):
     async with BROWSER_SEMAPHORE:
         try:
             driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
-            if not driver: return await s.edit_text("❌ Ошибка драйвера. См. логи.")
+            if not driver: return await s.edit_text("❌ Ошибка драйвера. Не найден.")
             
             ACTIVE_DRIVERS[phone] = {"driver": driver, "ua": ua, "res": res, "plat": plat, "tmp": tmp}
             
@@ -418,6 +443,6 @@ async def loop():
 
 async def main():
     cleanup_zombie(); db_init(); asyncio.create_task(loop())
-    logger.info("🚀 IMPERATOR v18.5 (IRONCLAD) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
+    logger.info("🚀 IMPERATOR v18.6 (BLOODHOUND) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
