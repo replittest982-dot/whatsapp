@@ -3,4 +3,4 @@ selenium==4.27.1
 psutil==6.1.0
 faker==33.1.0
 webdriver-manager==4.0.2
-packaging==24.1
+packaging==24.2
