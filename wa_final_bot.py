@@ -20,7 +20,7 @@ from faker import Faker
 # --- SELENIUM ---
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service # Важный импорт для фикса
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -28,7 +28,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v18.3.1 (DRIVER PATH FIX)
+# ⚙️ КОНФИГУРАЦИЯ v18.4 (SMART DRIVER SEARCH)
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -60,11 +60,9 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | INST-1 | %(levelna
 logger = logging.getLogger("Imperator")
 fake = Faker('ru_RU')
 
-# Создаем папки
 for d in [SESSIONS_DIR, TMP_BASE]:
     if not os.path.exists(d): os.makedirs(d)
 
-# БАЗА УСТРОЙСТВ (User Agents)
 DEVICES = [
     {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "res": "1920,1080", "plat": "Win32"},
     {"ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "res": "1366,768", "plat": "Linux x86_64"}
@@ -154,7 +152,7 @@ def db_set_vip(uid):
     conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE whitelist SET approved=1, is_unlimited=1 WHERE user_id=?", (uid,)); conn.commit(); conn.close()
 
 # ==========================================
-# 🌐 SELENIUM (CHROMIUM + DRIVER FIX)
+# 🌐 SELENIUM (SMART DRIVER SEARCH)
 # ==========================================
 def get_driver(phone):
     conn = sqlite3.connect(DB_NAME)
@@ -171,14 +169,14 @@ def get_driver(phone):
     unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     if not os.path.exists(unique_tmp): os.makedirs(unique_tmp)
 
-    # 🔥 1. Указываем путь к бинарнику Chromium
-    options.binary_location = "/usr/bin/chromium"
+    # 1. Находим Chromium
+    bin_path = shutil.which("chromium") or "/usr/bin/chromium"
+    options.binary_location = bin_path
 
     options.add_argument(f"--user-data-dir={prof}")
     options.add_argument(f"--data-path={unique_tmp}")
     options.add_argument(f"--disk-cache-dir={unique_tmp}")
     
-    # 🔥 2. Флаги для стабильности в Docker
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-setuid-sandbox") 
@@ -191,14 +189,23 @@ def get_driver(phone):
     options.add_argument(f"--user-agent={ua}")
     options.add_argument(f"--window-size={res}")
 
+    # 🔥 УМНЫЙ ПОИСК ДРАЙВЕРА 🔥
+    # Ищем, где система спрятала драйвер (chromedriver или chromium-driver)
+    driver_path = shutil.which("chromedriver") or shutil.which("chromium-driver") or "/usr/bin/chromedriver"
+    
+    # Если все равно не нашел, пробуем стандартные пути
+    if not driver_path or not os.path.exists(driver_path):
+        if os.path.exists("/usr/lib/chromium-browser/chromedriver"):
+            driver_path = "/usr/lib/chromium-browser/chromedriver"
+        elif os.path.exists("/usr/bin/chromium-driver"):
+            driver_path = "/usr/bin/chromium-driver"
+
     try:
-        # 🔥 3. Указываем путь к драйверу ЯВНО (Исправление ошибки)
-        service = Service(executable_path='/usr/bin/chromedriver')
-        
+        service = Service(executable_path=driver_path)
         driver = webdriver.Chrome(options=options, service=service)
         return driver, ua, res, plat, unique_tmp
     except Exception as e:
-        logger.error(f"❌ Driver Init Error: {e}")
+        logger.error(f"❌ Driver Init Error: {e} | Path tried: {driver_path}")
         return None, None, None, None, None
 
 # ==========================================
@@ -262,7 +269,7 @@ async def start(msg: types.Message):
         return await msg.answer("🔒 Заявка отправлена.")
     
     st = "👑 VIP (Безлимит)" if vip else "👤 Юзер"
-    await msg.answer(f"🔱 **Imperator v18.3.1 (Chromium)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
+    await msg.answer(f"🔱 **Imperator v18.4 (SmartFix)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
 
 @dp.callback_query(F.data.startswith("ap_"))
 async def ap(cb: types.CallbackQuery):
@@ -413,6 +420,6 @@ async def loop():
 
 async def main():
     cleanup_zombie(); db_init(); asyncio.create_task(loop())
-    logger.info("🚀 CHROMIUM v18.3.1 STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
+    logger.info("🚀 IMPERATOR v18.4 (SmartFix) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
