@@ -28,7 +28,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v18.4 (SMART DRIVER SEARCH)
+# ⚙️ КОНФИГУРАЦИЯ v18.5 (IRONCLAD)
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -152,7 +152,7 @@ def db_set_vip(uid):
     conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE whitelist SET approved=1, is_unlimited=1 WHERE user_id=?", (uid,)); conn.commit(); conn.close()
 
 # ==========================================
-# 🌐 SELENIUM (SMART DRIVER SEARCH)
+# 🌐 SELENIUM (IRONCLAD DRIVER SETUP)
 # ==========================================
 def get_driver(phone):
     conn = sqlite3.connect(DB_NAME)
@@ -169,9 +169,8 @@ def get_driver(phone):
     unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     if not os.path.exists(unique_tmp): os.makedirs(unique_tmp)
 
-    # 1. Находим Chromium
-    bin_path = shutil.which("chromium") or "/usr/bin/chromium"
-    options.binary_location = bin_path
+    # Указываем путь к Chromium
+    options.binary_location = "/usr/bin/chromium"
 
     options.add_argument(f"--user-data-dir={prof}")
     options.add_argument(f"--data-path={unique_tmp}")
@@ -189,23 +188,22 @@ def get_driver(phone):
     options.add_argument(f"--user-agent={ua}")
     options.add_argument(f"--window-size={res}")
 
-    # 🔥 УМНЫЙ ПОИСК ДРАЙВЕРА 🔥
-    # Ищем, где система спрятала драйвер (chromedriver или chromium-driver)
-    driver_path = shutil.which("chromedriver") or shutil.which("chromium-driver") or "/usr/bin/chromedriver"
-    
-    # Если все равно не нашел, пробуем стандартные пути
-    if not driver_path or not os.path.exists(driver_path):
-        if os.path.exists("/usr/lib/chromium-browser/chromedriver"):
-            driver_path = "/usr/lib/chromium-browser/chromedriver"
-        elif os.path.exists("/usr/bin/chromium-driver"):
-            driver_path = "/usr/bin/chromium-driver"
+    # 🔥 ЖЕСТКАЯ ПРИВЯЗКА к драйверу, который мы создали в Dockerfile
+    driver_path = "/usr/bin/chromedriver"
+
+    # ДИАГНОСТИКА: Проверяем, видит ли Python файл
+    if not os.path.exists(driver_path):
+        logger.error(f"❌ PANIC: Driver not found at {driver_path}")
+        return None, None, None, None, None
+    else:
+        logger.info(f"✅ Driver found: {driver_path}")
 
     try:
         service = Service(executable_path=driver_path)
         driver = webdriver.Chrome(options=options, service=service)
         return driver, ua, res, plat, unique_tmp
     except Exception as e:
-        logger.error(f"❌ Driver Init Error: {e} | Path tried: {driver_path}")
+        logger.error(f"❌ Driver Init Error: {e}")
         return None, None, None, None, None
 
 # ==========================================
@@ -269,7 +267,7 @@ async def start(msg: types.Message):
         return await msg.answer("🔒 Заявка отправлена.")
     
     st = "👑 VIP (Безлимит)" if vip else "👤 Юзер"
-    await msg.answer(f"🔱 **Imperator v18.4 (SmartFix)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
+    await msg.answer(f"🔱 **Imperator v18.5 (IRONCLAD)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
 
 @dp.callback_query(F.data.startswith("ap_"))
 async def ap(cb: types.CallbackQuery):
@@ -420,6 +418,6 @@ async def loop():
 
 async def main():
     cleanup_zombie(); db_init(); asyncio.create_task(loop())
-    logger.info("🚀 IMPERATOR v18.4 (SmartFix) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
+    logger.info("🚀 IMPERATOR v18.5 (IRONCLAD) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
