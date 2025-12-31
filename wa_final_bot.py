@@ -20,6 +20,7 @@ from faker import Faker
 # --- SELENIUM ---
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -27,7 +28,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v18.2 (ULTIMATE FIX)
+# ⚙️ КОНФИГУРАЦИЯ v18.3 (CHROMIUM FIX)
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -42,10 +43,9 @@ REQUIRED_CHANNEL_URL = "https://t.me/WhatsAppstatpro"
 INSTANCE_ID = int(os.getenv("INSTANCE_ID", 1))
 TOTAL_INSTANCES = int(os.getenv("TOTAL_INSTANCES", 1))
 
-# Лимит: 2 браузера одновременно (безопасно для 10ГБ)
 BROWSER_SEMAPHORE = asyncio.Semaphore(2)
 
-DB_NAME = 'imperator_ultimate_v18.db'
+DB_NAME = 'imperator_chromium_v18.db'
 SESSIONS_DIR = os.path.abspath("./sessions")
 TMP_BASE = os.path.abspath("./tmp_chrome_data")
 
@@ -60,14 +60,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | INST-1 | %(levelna
 logger = logging.getLogger("Imperator")
 fake = Faker('ru_RU')
 
-# Создаем папки
 for d in [SESSIONS_DIR, TMP_BASE]:
     if not os.path.exists(d): os.makedirs(d)
 
 # БАЗА УСТРОЙСТВ
 DEVICES = [
-    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", "res": "1920,1080", "plat": "Win32"},
-    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "res": "1440,900", "plat": "MacIntel"}
+    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "res": "1920,1080", "plat": "Win32"},
+    {"ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "res": "1366,768", "plat": "Linux x86_64"}
 ]
 
 ACTIVE_DRIVERS = {}
@@ -77,7 +76,7 @@ class BotStates(StatesGroup):
     waiting_vip_id = State()
 
 # ==========================================
-# 🧠 AI ДИАЛОГИ (УМНЫЙ ГЕНЕРАТОР)
+# 🧠 AI ДИАЛОГИ
 # ==========================================
 class DialogueAI:
     def __init__(self):
@@ -89,34 +88,25 @@ class DialogueAI:
     def generate(self):
         text = ""
         mode = random.choice(['greet', 'ask', 'answer', 'fake'])
-        
-        if mode == 'greet': 
-            text = f"{random.choice(self.greetings)}. {random.choice(self.questions)}"
-        elif mode == 'ask': 
-            text = random.choice(self.questions)
-        elif mode == 'answer': 
-            text = random.choice(self.answers)
-        else: 
-            text = fake.sentence(nb_words=random.randint(2, 6))
-        
-        if random.random() < 0.25: 
-            text += f" {random.choice(self.smiles)}"
+        if mode == 'greet': text = f"{random.choice(self.greetings)}. {random.choice(self.questions)}"
+        elif mode == 'ask': text = random.choice(self.questions)
+        elif mode == 'answer': text = random.choice(self.answers)
+        else: text = fake.sentence(nb_words=random.randint(2, 6))
+        if random.random() < 0.25: text += f" {random.choice(self.smiles)}"
         return text
 
 ai_engine = DialogueAI()
 
 # ==========================================
-# 🛠 СИСТЕМНЫЕ УТИЛИТЫ
+# 🛠 УТИЛИТЫ
 # ==========================================
 def cleanup_zombie():
-    """Убивает зависшие процессы Chrome"""
     killed = 0
     for p in psutil.process_iter(['name']):
-        if p.info['name'] in ['chrome', 'chromedriver']:
+        # Ищем процессы chromium и chromedriver
+        if p.info['name'] in ['chromium', 'chromedriver', 'chrome']:
             try: p.kill(); killed += 1
             except: pass
-    
-    # Чистим временные папки, если они есть
     if os.path.exists(TMP_BASE):
         try: shutil.rmtree(TMP_BASE)
         except: pass
@@ -164,7 +154,7 @@ def db_set_vip(uid):
     conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE whitelist SET approved=1, is_unlimited=1 WHERE user_id=?", (uid,)); conn.commit(); conn.close()
 
 # ==========================================
-# 🌐 SELENIUM (CRASH FIX: NO SINGLE PROCESS)
+# 🌐 SELENIUM (CHROMIUM FIX)
 # ==========================================
 def get_driver(phone):
     conn = sqlite3.connect(DB_NAME)
@@ -178,33 +168,33 @@ def get_driver(phone):
 
     options = Options()
     prof = os.path.join(SESSIONS_DIR, phone)
-    
-    # 🔥 Уникальная TMP папка для каждого процесса
     unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     if not os.path.exists(unique_tmp): os.makedirs(unique_tmp)
+
+    # 🔥 УКАЗЫВАЕМ ПУТЬ К CHROMIUM 🔥
+    options.binary_location = "/usr/bin/chromium"
 
     options.add_argument(f"--user-data-dir={prof}")
     options.add_argument(f"--data-path={unique_tmp}")
     options.add_argument(f"--disk-cache-dir={unique_tmp}")
     
-    # 🔥 НАСТРОЙКИ СТАБИЛЬНОСТИ 🔥
+    # 🔥 ГЛАВНЫЕ ФЛАГИ ПРОТИВ КРАША 🔥
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") # Спасает от крашей памяти
+    options.add_argument("--disable-setuid-sandbox") # ВАЖНО! ЛЕЧИТ ОШИБКУ RENDERER
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--disable-extensions")
     
-    # ⚠️ УБРАНЫ: --single-process, --no-zygote (они ломали Chrome 143)
-    
-    # Рандомный порт
-    options.add_argument(f"--remote-debugging-port={random.randint(9222, 9999)}")
-    
+    options.add_argument(f"--remote-debugging-port={random.randint(9222, 9899)}")
     options.add_argument(f"--user-agent={ua}")
     options.add_argument(f"--window-size={res}")
 
     try:
-        driver = webdriver.Chrome(options=options)
+        # Явно указываем путь к драйверу
+        service = Service(executable_path='/usr/bin/chromedriver')
+        driver = webdriver.Chrome(options=options, service=service)
         return driver, ua, res, plat, unique_tmp
     except Exception as e:
         logger.error(f"❌ Driver Init Error: {e}")
@@ -223,17 +213,14 @@ async def check_sub(uid):
     except: return False
 
 async def kill_timer(phone, chat_id, tmp):
-    """Таймер 120 сек. Удаляет мусор если не вошли."""
     await asyncio.sleep(120)
     if phone in ACTIVE_DRIVERS:
         d = ACTIVE_DRIVERS.pop(phone, None)
         if d: 
             try: d['driver'].quit()
             except: pass
-        
         shutil.rmtree(os.path.join(SESSIONS_DIR, phone), ignore_errors=True)
         if tmp and os.path.exists(tmp): shutil.rmtree(tmp, ignore_errors=True)
-        
         try: await bot.send_message(chat_id, f"⌛️ **Время вышло.** Сессия +{phone} удалена.")
         except: pass
 
@@ -274,7 +261,7 @@ async def start(msg: types.Message):
         return await msg.answer("🔒 Заявка отправлена.")
     
     st = "👑 VIP (Безлимит)" if vip else "👤 Юзер"
-    await msg.answer(f"🔱 **Imperator v18.2**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
+    await msg.answer(f"🔱 **Imperator v18.3 (Chromium)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
 
 @dp.callback_query(F.data.startswith("ap_"))
 async def ap(cb: types.CallbackQuery):
@@ -309,7 +296,7 @@ async def vip_f(msg: types.Message, state: FSMContext):
     except: await msg.answer("Ошибка")
     await state.clear()
 
-# --- ADD ACCOUNT (ZIP FILE LOGIC RECREATED) ---
+# --- ADD ACCOUNT ---
 @dp.callback_query(F.data == "add_acc")
 async def add_a(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.answer("📞 Введи номер (только цифры):"); await state.set_state(BotStates.waiting_phone)
@@ -323,50 +310,35 @@ async def add_p(msg: types.Message, state: FSMContext):
     async with BROWSER_SEMAPHORE:
         try:
             driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
-            if not driver: return await s.edit_text("❌ Ошибка драйвера (Crash).")
+            if not driver: return await s.edit_text("❌ Ошибка запуска Chromium.")
             
             ACTIVE_DRIVERS[phone] = {"driver": driver, "ua": ua, "res": res, "plat": plat, "tmp": tmp}
             
-            # 1. Открываем на английском, чтобы точно найти кнопку (НАДЕЖНОСТЬ)
             await asyncio.to_thread(driver.get, "https://web.whatsapp.com/?lang=en")
             wait = WebDriverWait(driver, 45)
             
-            # 2. Ищем и кликаем 'Link with phone number'
             try:
                 link_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//*[contains(text(), 'Link with phone')]")))
                 link_btn.click()
             except:
-                # Если не нашли по тексту, запасной JS
                 driver.execute_script("var b=document.querySelector('span[role=\"button\"]'); if(b && b.innerText.includes('Link')) b.click();")
 
-            # 3. Вводим номер
             try:
                 inp = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='text']")))
-                inp.click()
-                inp.clear()
-                # Ввод по цифре (имитация человека)
+                inp.click(); inp.clear()
                 for digit in f"+{phone}":
-                    inp.send_keys(digit)
-                    await asyncio.sleep(0.05)
-                await asyncio.sleep(0.5)
-                inp.send_keys(Keys.ENTER)
+                    inp.send_keys(digit); await asyncio.sleep(0.05)
+                await asyncio.sleep(0.5); inp.send_keys(Keys.ENTER)
             except:
-                # Если поля нет - шлем скрин ошибки
                 png = await asyncio.to_thread(driver.get_screenshot_as_png)
                 await s.delete()
                 await msg.answer_photo(BufferedInputFile(png, "err.png"), caption="❌ Не нашел поле ввода.")
                 return
 
-            # 4. Ждем генерацию кода
             await asyncio.sleep(15)
-            
             png = await asyncio.to_thread(driver.get_screenshot_as_png)
             await s.delete()
-            await msg.answer_photo(
-                BufferedInputFile(png, "code.png"), 
-                caption=f"✅ Код для +{phone}\n⏱ Таймер 120 сек", 
-                reply_markup=kb_code(phone)
-            )
+            await msg.answer_photo(BufferedInputFile(png, "code.png"), caption=f"✅ Код для +{phone}\n⏱ Таймер 120 сек", reply_markup=kb_code(phone))
             asyncio.create_task(kill_timer(phone, msg.chat.id, tmp))
             
         except Exception as e:
@@ -394,9 +366,7 @@ async def fin(cb: types.CallbackQuery):
         await cb.message.edit_text(f"✅ +{p} Сохранен!")
     else: await cb.message.edit_text("❌ Время вышло")
 
-# ==========================================
-# 🚜 HIVE MIND (АВТОМАТИЧЕСКАЯ СЕТКА)
-# ==========================================
+# --- HIVE MIND ---
 async def worker(phone):
     driver = None; tmp = None
     try:
@@ -422,7 +392,7 @@ async def worker(phone):
                 if "not allowed" in src or "spam" in src:
                     db_ban(phone)
                     shutil.rmtree(os.path.join(SESSIONS_DIR, phone), ignore_errors=True)
-                    logger.error(f"💀 BAN DETECTED: {phone}")
+                    logger.error(f"💀 BAN: {phone}")
 
     except Exception as e:
         logger.error(f"Worker Error: {e}")
@@ -436,14 +406,12 @@ async def loop():
     while True:
         accs = db_get_my_targets()
         if not accs: await asyncio.sleep(30); continue
-        
         for p, _ in accs:
             if p not in ACTIVE_DRIVERS: await worker(p); await asyncio.sleep(15)
-        
         await asyncio.sleep(random.randint(*HEAT_MODES[CURRENT_MODE]))
 
 async def main():
     cleanup_zombie(); db_init(); asyncio.create_task(loop())
-    logger.info("🚀 ULTIMATE FIX v18.2 STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
+    logger.info("🚀 CHROMIUM v18.3 STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
