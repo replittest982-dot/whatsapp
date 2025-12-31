@@ -17,7 +17,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from faker import Faker
 
-# --- SELENIUM ---
+# --- SELENIUM & MANAGER ---
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -27,8 +27,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
+# 🔥 АВТО-ЗАГРУЗЧИК ДРАЙВЕРА 🔥
+from webdriver_manager.chrome import ChromeDriverManager
+from webdriver_manager.core.os_manager import ChromeType
+
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v18.6 (BLOODHOUND FIX)
+# ⚙️ КОНФИГУРАЦИЯ v19.0 (AUTOPILOT)
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -73,31 +77,6 @@ ACTIVE_DRIVERS = {}
 class BotStates(StatesGroup):
     waiting_phone = State()
     waiting_vip_id = State()
-
-# ==========================================
-# 🔍 ФУНКЦИЯ-ИЩЕЙКА ДРАЙВЕРА
-# ==========================================
-def find_system_driver():
-    """Ищет chromedriver во всех возможных системных папках"""
-    # 1. Спрашиваем систему (PATH)
-    path = shutil.which("chromedriver") or shutil.which("chromium-driver")
-    if path: return path
-
-    # 2. Проверяем популярные места Debian/Ubuntu
-    common_paths = [
-        "/usr/bin/chromedriver",
-        "/usr/bin/chromium-driver",
-        "/usr/lib/chromium/chromedriver",
-        "/usr/lib/chromium-browser/chromedriver",
-        "/usr/lib/chromium/chromium-driver",
-        "/usr/local/bin/chromedriver"
-    ]
-    
-    for p in common_paths:
-        if os.path.exists(p):
-            return p
-            
-    return None
 
 # ==========================================
 # 🧠 AI ДИАЛОГИ
@@ -177,7 +156,7 @@ def db_set_vip(uid):
     conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE whitelist SET approved=1, is_unlimited=1 WHERE user_id=?", (uid,)); conn.commit(); conn.close()
 
 # ==========================================
-# 🌐 SELENIUM (BLOODHOUND SETUP)
+# 🌐 SELENIUM (AUTOPILOT SETUP)
 # ==========================================
 def get_driver(phone):
     conn = sqlite3.connect(DB_NAME)
@@ -194,7 +173,7 @@ def get_driver(phone):
     unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     if not os.path.exists(unique_tmp): os.makedirs(unique_tmp)
 
-    # 1. Ищем бинарник браузера
+    # 1. Путь к браузеру
     browser_bin = shutil.which("chromium") or "/usr/bin/chromium"
     options.binary_location = browser_bin
 
@@ -214,21 +193,17 @@ def get_driver(phone):
     options.add_argument(f"--user-agent={ua}")
     options.add_argument(f"--window-size={res}")
 
-    # 2. ИЩЕМ ДРАЙВЕР (Умный поиск)
-    driver_path = find_system_driver()
-
-    if not driver_path:
-        logger.error(f"❌ FATAL: Драйвер не найден ни в одной папке! Проверьте установку.")
-        return None, None, None, None, None
-    
-    # logger.info(f"✅ Driver found at: {driver_path}")
-
     try:
+        # 🔥 AUTOPILOT: Сами качаем драйвер под версию Chromium
+        logger.info("🛠 Manager: Installing compatible driver...")
+        driver_path = ChromeDriverManager(chrome_type=ChromeType.CHROMIUM).install()
+        
+        logger.info(f"✅ Manager: Driver installed at {driver_path}")
         service = Service(executable_path=driver_path)
         driver = webdriver.Chrome(options=options, service=service)
         return driver, ua, res, plat, unique_tmp
     except Exception as e:
-        logger.error(f"❌ Driver Init Error: {e}")
+        logger.error(f"❌ Driver Manager Error: {e}")
         return None, None, None, None, None
 
 # ==========================================
@@ -292,7 +267,7 @@ async def start(msg: types.Message):
         return await msg.answer("🔒 Заявка отправлена.")
     
     st = "👑 VIP (Безлимит)" if vip else "👤 Юзер"
-    await msg.answer(f"🔱 **Imperator v18.6 (BLOODHOUND)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
+    await msg.answer(f"🔱 **Imperator v19.0 (AUTOPILOT)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
 
 @dp.callback_query(F.data.startswith("ap_"))
 async def ap(cb: types.CallbackQuery):
@@ -336,12 +311,12 @@ async def add_a(cb: types.CallbackQuery, state: FSMContext):
 async def add_p(msg: types.Message, state: FSMContext):
     phone = "".join(filter(str.isdigit, msg.text))
     await state.clear()
-    s = await msg.answer(f"🚀 Запуск для +{phone}...\n⏳ Ищу кнопку входа (English Mode)...")
+    s = await msg.answer(f"🚀 Запуск для +{phone}...\n⏳ Скачиваю драйвер и вхожу...")
     
     async with BROWSER_SEMAPHORE:
         try:
             driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
-            if not driver: return await s.edit_text("❌ Ошибка драйвера. Не найден.")
+            if not driver: return await s.edit_text("❌ Ошибка запуска. См. логи.")
             
             ACTIVE_DRIVERS[phone] = {"driver": driver, "ua": ua, "res": res, "plat": plat, "tmp": tmp}
             
@@ -443,6 +418,6 @@ async def loop():
 
 async def main():
     cleanup_zombie(); db_init(); asyncio.create_task(loop())
-    logger.info("🚀 IMPERATOR v18.6 (BLOODHOUND) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
+    logger.info("🚀 IMPERATOR v19.0 (AUTOPILOT) STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
