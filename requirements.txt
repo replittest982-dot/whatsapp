@@ -3,4 +3,4 @@ selenium==4.27.1
 psutil==6.1.0
 faker==33.1.0
 webdriver-manager==4.0.2
-uvloop==0.21.0; sys_platform != 'win32'
+packaging==24.1
