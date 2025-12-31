@@ -20,7 +20,7 @@ from faker import Faker
 # --- SELENIUM ---
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.service import Service # Важный импорт для фикса
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -28,7 +28,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v18.3 (CHROMIUM FIX)
+# ⚙️ КОНФИГУРАЦИЯ v18.3.1 (DRIVER PATH FIX)
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -60,10 +60,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | INST-1 | %(levelna
 logger = logging.getLogger("Imperator")
 fake = Faker('ru_RU')
 
+# Создаем папки
 for d in [SESSIONS_DIR, TMP_BASE]:
     if not os.path.exists(d): os.makedirs(d)
 
-# БАЗА УСТРОЙСТВ
+# БАЗА УСТРОЙСТВ (User Agents)
 DEVICES = [
     {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "res": "1920,1080", "plat": "Win32"},
     {"ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "res": "1366,768", "plat": "Linux x86_64"}
@@ -103,7 +104,6 @@ ai_engine = DialogueAI()
 def cleanup_zombie():
     killed = 0
     for p in psutil.process_iter(['name']):
-        # Ищем процессы chromium и chromedriver
         if p.info['name'] in ['chromium', 'chromedriver', 'chrome']:
             try: p.kill(); killed += 1
             except: pass
@@ -154,7 +154,7 @@ def db_set_vip(uid):
     conn = sqlite3.connect(DB_NAME); conn.execute("UPDATE whitelist SET approved=1, is_unlimited=1 WHERE user_id=?", (uid,)); conn.commit(); conn.close()
 
 # ==========================================
-# 🌐 SELENIUM (CHROMIUM FIX)
+# 🌐 SELENIUM (CHROMIUM + DRIVER FIX)
 # ==========================================
 def get_driver(phone):
     conn = sqlite3.connect(DB_NAME)
@@ -171,17 +171,17 @@ def get_driver(phone):
     unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{random.randint(1000,9999)}")
     if not os.path.exists(unique_tmp): os.makedirs(unique_tmp)
 
-    # 🔥 УКАЗЫВАЕМ ПУТЬ К CHROMIUM 🔥
+    # 🔥 1. Указываем путь к бинарнику Chromium
     options.binary_location = "/usr/bin/chromium"
 
     options.add_argument(f"--user-data-dir={prof}")
     options.add_argument(f"--data-path={unique_tmp}")
     options.add_argument(f"--disk-cache-dir={unique_tmp}")
     
-    # 🔥 ГЛАВНЫЕ ФЛАГИ ПРОТИВ КРАША 🔥
+    # 🔥 2. Флаги для стабильности в Docker
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-setuid-sandbox") # ВАЖНО! ЛЕЧИТ ОШИБКУ RENDERER
+    options.add_argument("--disable-setuid-sandbox") 
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-software-rasterizer")
@@ -192,8 +192,9 @@ def get_driver(phone):
     options.add_argument(f"--window-size={res}")
 
     try:
-        # Явно указываем путь к драйверу
+        # 🔥 3. Указываем путь к драйверу ЯВНО (Исправление ошибки)
         service = Service(executable_path='/usr/bin/chromedriver')
+        
         driver = webdriver.Chrome(options=options, service=service)
         return driver, ua, res, plat, unique_tmp
     except Exception as e:
@@ -261,7 +262,7 @@ async def start(msg: types.Message):
         return await msg.answer("🔒 Заявка отправлена.")
     
     st = "👑 VIP (Безлимит)" if vip else "👤 Юзер"
-    await msg.answer(f"🔱 **Imperator v18.3 (Chromium)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
+    await msg.answer(f"🔱 **Imperator v18.3.1 (Chromium)**\nСтатус: {st}", reply_markup=kb_main(msg.from_user.id))
 
 @dp.callback_query(F.data.startswith("ap_"))
 async def ap(cb: types.CallbackQuery):
@@ -310,7 +311,7 @@ async def add_p(msg: types.Message, state: FSMContext):
     async with BROWSER_SEMAPHORE:
         try:
             driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
-            if not driver: return await s.edit_text("❌ Ошибка запуска Chromium.")
+            if not driver: return await s.edit_text("❌ Ошибка драйвера. См. логи.")
             
             ACTIVE_DRIVERS[phone] = {"driver": driver, "ua": ua, "res": res, "plat": plat, "tmp": tmp}
             
@@ -412,6 +413,6 @@ async def loop():
 
 async def main():
     cleanup_zombie(); db_init(); asyncio.create_task(loop())
-    logger.info("🚀 CHROMIUM v18.3 STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
+    logger.info("🚀 CHROMIUM v18.3.1 STARTED"); await bot.delete_webhook(drop_pending_updates=True); await dp.start_polling(bot)
 
 if __name__ == "__main__": asyncio.run(main())
