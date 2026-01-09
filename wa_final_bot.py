@@ -59,7 +59,9 @@ async def init_db():
                 first_name TEXT,
                 is_approved INTEGER DEFAULT 0,
                 is_banned INTEGER DEFAULT 0,
-                reg_date TEXT DEFAULT CURRENT_TIMESTAMP
+                reg_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_afk_ping TEXT,
+                afk_level INTEGER DEFAULT 0
             )
         """)
         
@@ -448,21 +450,25 @@ async def cb_acc(c: CallbackQuery, bot: Bot):
             await c.message.edit_text(f"🚫 Забанен {uid}")
 
 # ==========================================
-# FIX: КНОПКА "Я ТУТ" ТЕПЕРЬ ОБНОВЛЯЕТ ВСЕ НОМЕРА ЮЗЕРА
+# ИСПРАВЛЕННАЯ AFK СИСТЕМА
 # ==========================================
 @router.callback_query(F.data.startswith("afk_ok_"))
 async def cb_afk(c: CallbackQuery):
-    nid = c.data.split("_")[2]
+    """Юзер нажал 'Я тут!' - сбрасываем его AFK статус в таблице users"""
+    uid = c.from_user.id
     async with get_db() as db:
-        # Узнаем чей это номер
-        row = await (await db.execute("SELECT user_id FROM numbers WHERE id=?", (nid,))).fetchone()
-        if row:
-            uid = row['user_id']
-            # Обновляем ВСЕ номера этого юзера в очереди, чтобы таймер сбросился везде
-            await db.execute("UPDATE numbers SET last_ping=?, afk_level=0 WHERE user_id=? AND status='queue'", (get_now(), uid))
-            await db.commit()
-    await c.message.delete()
-    await c.answer("✅ Вы в очереди! (Для всех номеров)")
+        # Обновляем запись юзера (не номеров!)
+        await db.execute(
+            "UPDATE users SET last_afk_ping=?, afk_level=0 WHERE user_id=?", 
+            (get_now(), uid)
+        )
+        await db.commit()
+    
+    try:
+        await c.message.delete()
+    except:
+        pass
+    await c.answer("✅ Вы в очереди!")
 
 @router.callback_query(F.data == "admin_main")
 async def cb_adm(c: CallbackQuery):
@@ -599,16 +605,23 @@ async def fsm_nums(m: Message, state: FSMContext):
     if not valid: return await m.reply("❌ Номера не найдены")
     added = 0
     duplicates = []
+    
+    # Инициализируем AFK статус для юзера если его нет
+    async with get_db() as db:
+        user_check = await (await db.execute("SELECT last_afk_ping FROM users WHERE user_id=?", (m.from_user.id,))).fetchone()
+        if not user_check or not user_check['last_afk_ping']:
+            await db.execute("UPDATE users SET last_afk_ping=?, afk_level=0 WHERE user_id=?", (get_now(), m.from_user.id))
+            await db.commit()
+    
     async with get_db() as db:
         for ph in valid:
             ph_hash = get_phone_hash(ph)
-            # ПРОВЕРКА ДУБЛЕЙ: Только в активных статусах
             exists = await (await db.execute("SELECT id FROM numbers WHERE phone_hash=? AND status IN ('queue', 'work', 'active')", (ph_hash,))).fetchone()
             if exists:
                 duplicates.append(ph)
                 continue
-            # Устанавливаем afk_level=0 и last_ping=now при создании
-            await db.execute("INSERT INTO numbers (user_id, phone, phone_hash, tariff_name, tariff_price, work_time, last_ping, afk_level) VALUES (?, ?, ?, ?, ?, ?, ?, 0)", (m.from_user.id, ph, ph_hash, data['tariff'], data['price'], data['work_time'], get_now()))
+            # Номера больше не хранят afk_level - он теперь в users
+            await db.execute("INSERT INTO numbers (user_id, phone, phone_hash, tariff_name, tariff_price, work_time) VALUES (?, ?, ?, ?, ?, ?)", (m.from_user.id, ph, ph_hash, data['tariff'], data['price'], data['work_time']))
             added += 1
         await db.commit()
     msg = f"✅ Добавлено: {added}\n"
@@ -730,96 +743,132 @@ async def handle_msg(m: Message, bot: Bot, state: FSMContext):
         except: await m.answer("❌ Ошибка")
 
 # ==========================================
-# FIX: ГРУППИРОВКА ПО USER_ID (NO SPAM)
+# ИСПРАВЛЕННЫЙ МОНИТОР (1 УВЕДОМЛЕНИЕ НА ЮЗЕРА)
 # ==========================================
 async def monitor(bot: Bot):
-    logger.info("Monitor started")
+    logger.info("🔍 Monitor started")
     while True:
         try:
             await asyncio.sleep(30)
             now = datetime.now(timezone.utc)
             
             async with get_db() as db:
-                # 1. КОД ТАЙМАУТ (5 мин) - работает для каждого номера отдельно, это ок
-                waiters = await (await db.execute("SELECT id, user_id, phone, worker_chat_id, worker_thread_id, wait_code_start FROM numbers WHERE status='active' AND wait_code_start IS NOT NULL")).fetchall()
+                # ===== 1. КОД ТАЙМАУТ (5 мин) =====
+                waiters = await (await db.execute(
+                    "SELECT id, user_id, phone, worker_chat_id, worker_thread_id, wait_code_start "
+                    "FROM numbers WHERE status='active' AND wait_code_start IS NOT NULL"
+                )).fetchall()
+                
                 for w in waiters:
                     st = datetime.fromisoformat(w['wait_code_start'])
                     if (now - st).total_seconds() / 60 >= 5:
-                        await db.execute("UPDATE numbers SET status='dead', end_time=?, wait_code_start=NULL WHERE id=?", (get_now(), w['id']))
+                        await db.execute(
+                            "UPDATE numbers SET status='dead', end_time=?, wait_code_start=NULL WHERE id=?", 
+                            (get_now(), w['id'])
+                        )
                         try:
                             await bot.send_message(w['user_id'], f"⏰ Время ожидания кода вышло\n{w['phone']} отменен")
                             if w['worker_chat_id']: 
-                                await bot.send_message(chat_id=w['worker_chat_id'], message_thread_id=w['worker_thread_id'] if w['worker_thread_id'] else None, text="⚠️ Таймаут кода (5 мин)!")
-                        except: pass
-
-                # 2. AFK СИСТЕМА (ГРУППИРОВКА ПО USER_ID)
-                # Берем уникальных юзеров из очереди и их самый "старый" номер (min created/ping)
-                # Это нужно, чтобы если юзер залил пачку номеров, мы считали время от самого первого
-                sql = """
-                    SELECT user_id, 
-                           MIN(COALESCE(NULLIF(last_ping, ''), created_at)) as last_activity,
-                           MAX(afk_level) as current_level,
-                           MIN(id) as first_number_id
-                    FROM numbers 
-                    WHERE status='queue' 
-                    GROUP BY user_id
-                """
-                users_in_queue = await (await db.execute(sql)).fetchall()
+                                await bot.send_message(
+                                    chat_id=w['worker_chat_id'], 
+                                    message_thread_id=w['worker_thread_id'] if w['worker_thread_id'] else None, 
+                                    text="⚠️ Таймаут кода (5 мин)!"
+                                )
+                        except Exception as e:
+                            logger.error(f"Timeout notify failed: {e}")
                 
-                for u in users_in_queue:
-                    uid = u['user_id']
-                    last_act_str = u['last_activity']
+                await db.commit()
+
+                # ===== 2. AFK СИСТЕМА (ОДИН ЗАПРОС НА ЮЗЕРА) =====
+                # Берем только тех юзеров, у которых ЕСТЬ номера в очереди
+                sql = """
+                    SELECT DISTINCT u.user_id, u.last_afk_ping, u.afk_level
+                    FROM users u
+                    INNER JOIN numbers n ON u.user_id = n.user_id
+                    WHERE n.status = 'queue'
+                """
+                users_with_queue = await (await db.execute(sql)).fetchall()
+                
+                updates_to_apply = []
+                notifications_to_send = []
+                
+                for user in users_with_queue:
+                    uid = user['user_id']
+                    last_ping = user['last_afk_ping']
+                    current_level = user['afk_level'] or 0
                     
-                    # Очистка старых форматов
-                    if str(last_act_str).startswith("WARN"):
-                        try: last_act_str = last_act_str.split("_")[-1]
-                        except: last_act_str = get_now()
+                    # Если нет пинга - ставим текущее время
+                    if not last_ping:
+                        await db.execute(
+                            "UPDATE users SET last_afk_ping=?, afk_level=0 WHERE user_id=?", 
+                            (get_now(), uid)
+                        )
+                        continue
                     
-                    last_time = datetime.fromisoformat(last_act_str)
+                    try:
+                        last_time = datetime.fromisoformat(last_ping)
+                    except:
+                        logger.warning(f"Invalid timestamp for user {uid}: {last_ping}")
+                        continue
+                    
                     diff_min = (now - last_time).total_seconds() / 60
-                    level = u['current_level']
-                    
-                    new_level = level
+                    new_level = current_level
                     notify_text = None
+                    kb = None
                     kick = False
                     
-                    # 5-3-1 Логика
-                    if level == 0 and diff_min >= 5:
+                    # ===== ЛОГИКА 7-3-1 =====
+                    if current_level == 0 and diff_min > 7:
                         new_level = 1
                         notify_text = "⏳ Вы тут? Осталось 3 минуты! Нажмите кнопку ниже."
-                        # Кнопка привязывается к ID первого номера, но обработчик обновит ВСЕ номера юзера
-                        kb = InlineKeyboardBuilder().button(text="👋 Я тут!", callback_data=f"afk_ok_{u['first_number_id']}").as_markup()
+                        kb = InlineKeyboardBuilder().button(
+                            text="👋 Я тут!", 
+                            callback_data=f"afk_ok_{uid}"
+                        ).as_markup()
                     
-                    elif level == 1 and diff_min >= 2:
+                    elif current_level == 1 and diff_min > 10:  # 7 + 3
                         new_level = 2
-                        notify_text = "⏳ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ: Осталась 1 минута!"
-                        kb = None
+                        notify_text = "⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ: Осталась 1 минута!"
                         
-                    elif level == 2 and diff_min >= 1:
+                    elif current_level == 2 and diff_min > 11:  # 10 + 1
                         new_level = 3
                         kick = True
                         notify_text = "❌ Вы были удалены из очереди за неактивность (AFK)"
-                        kb = None
 
-                    if new_level > level:
-                        if kick:
-                            logger.info(f"Kicking AFK user {uid}")
-                            # Удаляем ВСЕ номера этого юзера из очереди
-                            await db.execute("DELETE FROM numbers WHERE user_id=? AND status='queue'", (uid,))
-                        else:
-                            # Обновляем ВСЕ номера этого юзера
-                            await db.execute("UPDATE numbers SET afk_level=?, last_ping=? WHERE user_id=? AND status='queue'", (new_level, get_now(), uid))
-                        
+                    # Применяем только если уровень изменился
+                    if new_level > current_level:
+                        updates_to_apply.append((new_level, uid, kick))
                         if notify_text:
-                            try:
-                                await bot.send_message(uid, notify_text, reply_markup=kb)
-                            except Exception as e:
-                                logger.warning(f"Notify failed for {uid}: {e}")
-
+                            notifications_to_send.append((uid, notify_text, kb))
+                
+                # ===== ПРИМЕНЯЕМ ВСЕ ОБНОВЛЕНИЯ РАЗОМ =====
+                for new_level, uid, kick in updates_to_apply:
+                    if kick:
+                        logger.info(f"❌ Kicking AFK user {uid}")
+                        # Удаляем ВСЕ номера этого юзера из очереди
+                        await db.execute("DELETE FROM numbers WHERE user_id=? AND status='queue'", (uid,))
+                        # Сбрасываем его AFK статус
+                        await db.execute("UPDATE users SET afk_level=0, last_afk_ping=NULL WHERE user_id=?", (uid,))
+                    else:
+                        # Обновляем уровень AFK в users
+                        await db.execute(
+                            "UPDATE users SET afk_level=?, last_afk_ping=? WHERE user_id=?", 
+                            (new_level, get_now(), uid)
+                        )
+                
+                # ✅ КРИТИЧНО: Коммитим ДО отправки уведомлений!
                 await db.commit()
                 
+                # ===== ОТПРАВЛЯЕМ УВЕДОМЛЕНИЯ =====
+                for uid, text, kb in notifications_to_send:
+                    try:
+                        await bot.send_message(uid, text, reply_markup=kb)
+                        logger.info(f"✉️ AFK notification sent to {uid}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to notify {uid}: {e}")
+                
         except Exception as e:
-            logger.error(f"Monitor loop error: {e}")
+            logger.exception(f"💥 Monitor loop error: {e}")
             await asyncio.sleep(5)
 
 async def main():
