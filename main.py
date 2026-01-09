@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
-# 🚀 1. UVLOOP (Ускоритель ядра)
+# 🚀 1. UVLOOP (Ускоритель ядра для Linux)
 if sys.platform != 'win32':
     try:
         import uvloop
@@ -42,7 +42,7 @@ except ImportError:
     TTS_AVAILABLE = False
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v32.0 (MANUAL ELITE)
+# ⚙️ КОНФИГУРАЦИЯ v33.0
 # ==========================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -54,7 +54,7 @@ except ValueError:
 if not BOT_TOKEN:
     sys.exit("❌ FATAL: Нет токена! Установи переменную BOT_TOKEN.")
 
-DB_NAME = 'imperator_v32.db'
+DB_NAME = 'imperator_v33.db'
 SESSIONS_DIR = os.path.abspath("./sessions")
 TMP_BASE = os.path.abspath("./tmp")
 AUDIO_DIR = os.path.abspath("./audio")
@@ -97,7 +97,7 @@ logger = logging.getLogger("Imperator")
 logger.setLevel(logging.INFO)
 
 console_handler = logging.StreamHandler()
-console_handler.setFormatter(logging.Formatter('%(asctime)s | 32.0 | %(levelname)s | %(message)s'))
+console_handler.setFormatter(logging.Formatter('%(asctime)s | 33.0 | %(levelname)s | %(message)s'))
 logger.addHandler(console_handler)
 
 file_handler = RotatingFileHandler('imperator.log', maxBytes=10*1024*1024, backupCount=3)
@@ -125,29 +125,15 @@ class DialogueAI:
             "Перезвоню потом", "Скинь инфу", "Понял тебя",
             "Хорошо", "Да", "Норм", "Договорились"
         ]
-        self.emojis = [" 😄", " 👍", " 🔥", " 👌", " ✅", " 💪"]
+        # Простые эмодзи, чтобы не ломать старые драйверы
+        self.emojis = [" :)", " ;)", " !", " +", " ok"]
     
     def generate(self):
         msg = random.choice(self.msgs)
         if random.random() < 0.3: msg += random.choice(self.emojis)
-        if random.random() < 0.1: msg = self._add_typo(msg)
         return msg
-    
-    def _add_typo(self, text):
-        typo_map = {'а': 'о', 'о': 'а', 'е': 'и', 'и': 'е', 'т': 'р', 'р': 'т'}
-        text_list = list(text.lower())
-        for i, char in enumerate(text_list):
-            if char in typo_map and random.random() < 0.5:
-                text_list[i] = typo_map[char]
-                break
-        return ''.join(text_list).capitalize()
 
 ai_engine = DialogueAI()
-
-TTS_PHRASES = [
-    "Алло, привет!", "Да, слушаю", "Сейчас занят, перезвоню",
-    "Позвони позже пожалуйста", "Не могу говорить", "Перезвони через час"
-]
 
 def get_sys_status():
     mem = psutil.virtual_memory()
@@ -236,7 +222,7 @@ async def db_approve(user_id):
         await db.commit()
 
 # ==========================================
-# 🌐 SELENIUM (FIXED FOR MANUAL)
+# 🌐 SELENIUM
 # ==========================================
 def get_driver(phone):
     d_profile = random.choice(DEVICES)
@@ -250,7 +236,7 @@ def get_driver(phone):
     options.add_argument(f"--user-data-dir={prof}")
     options.add_argument(f"--data-path={unique_tmp}")
     
-    # ПРИНУДИТЕЛЬНЫЙ АНГЛИЙСКИЙ
+    # ПРИНУДИТЕЛЬНЫЙ АНГЛИЙСКИЙ (чтобы селекторы работали)
     options.add_argument("--lang=en-US")
     
     options.add_argument("--headless=new")
@@ -275,7 +261,7 @@ def get_driver(phone):
 
 async def safe_click(driver, selector_type, selector_val, timeout=10):
     """
-    🔥 JS-KILLER: Пробивает любую защиту интерфейса
+    🔥 JS-KILLER: Пробивает защиту интерфейса
     """
     try:
         # 1. Сначала ждем элемент
@@ -309,7 +295,7 @@ async def cleanup_driver(phone):
             shutil.rmtree(data['tmp'], ignore_errors=True)
 
 # ==========================================
-# 📤 ОТПРАВКА (HARD MODE)
+# 📤 ОТПРАВКА (BMP FIX + JS INJECTION)
 # ==========================================
 async def perform_send(sender, target, text):
     driver = None
@@ -320,6 +306,7 @@ async def perform_send(sender, target, text):
             
             ACTIVE_DRIVERS[sender] = {'driver': driver, 'tmp': tmp}
             
+            # 1. Открываем чат
             try:
                 driver.set_page_load_timeout(40)
                 await asyncio.to_thread(driver.get, f"https://web.whatsapp.com/send?phone={target}")
@@ -327,15 +314,27 @@ async def perform_send(sender, target, text):
             
             wait = WebDriverWait(driver, 50)
             
+            # 2. Ждем поле ввода
             inp = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "footer div[contenteditable='true']")))
-            await asyncio.sleep(2)
+            await asyncio.sleep(5) # Даем время на прогрузку
             
-            for c in text: 
-                inp.send_keys(c)
-                await asyncio.sleep(0.05)
+            # 3. 🔥 ВСТАВКА ТЕКСТА ЧЕРЕЗ JS (ИСПРАВЛЕНИЕ BMP ERROR)
+            try:
+                # Вставляем текст напрямую в DOM
+                driver.execute_script("arguments[0].innerText = arguments[1];", inp, text)
+                # Триггерим событие ввода (пробел + бэкспейс)
+                inp.send_keys(Keys.SPACE)
+                await asyncio.sleep(0.5)
+                inp.send_keys(Keys.BACK_SPACE)
+            except Exception as e:
+                logger.error(f"JS Insert Failed, trying legacy: {e}")
+                for c in text: 
+                    try: inp.send_keys(c)
+                    except: pass
+            
             await asyncio.sleep(1)
             
-            # 🔥 ДВОЙНОЙ УДАР ПО ОТПРАВКЕ
+            # 4. 🔥 ЖЕСТКАЯ ОТПРАВКА
             inp.send_keys(Keys.ENTER)
             try:
                 # Ищем кнопку самолетика и жмем JS-ом
@@ -487,7 +486,7 @@ def kb_manual_control(phone):
 async def start(msg: types.Message):
     await db_init()
     if await db_check_perm(msg.from_user.id):
-        await msg.answer("🔱 **IMPERATOR v32 (MANUAL ELITE)**", reply_markup=kb_main(msg.from_user.id==ADMIN_ID))
+        await msg.answer("🔱 **IMPERATOR v33 (PLATINUM)**", reply_markup=kb_main(msg.from_user.id==ADMIN_ID))
     else:
         await db_add_request(msg.from_user.id, msg.from_user.username)
         if ADMIN_ID: await bot.send_message(ADMIN_ID, f"Заявка: {msg.from_user.id}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅", callback_data=f"approve_{msg.from_user.id}")]]))
@@ -513,21 +512,31 @@ async def main_menu(cb: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("manage_"))
 async def manage_num(cb: types.CallbackQuery):
     phone = cb.data.split("_")[1]
+    
+    # Получаем текущий режим для галочек
+    mode = "normal"
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT mode FROM accounts WHERE phone=?", (phone,)) as cur:
+            res = await cur.fetchone()
+            if res: mode = res[0]
+            
+    # Динамическая клавиатура с галочками
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔥 NORMAL", callback_data=f"setmode_normal_{phone}")],
-        [InlineKeyboardButton(text="👤 SOLO", callback_data=f"setmode_solo_{phone}")],
-        [InlineKeyboardButton(text="👻 GHOST", callback_data=f"setmode_ghost_{phone}")],
-        [InlineKeyboardButton(text="📞 CALLER", callback_data=f"setmode_caller_{phone}")],
+        [InlineKeyboardButton(text=f"{'✅ ' if mode=='normal' else ''}🔥 NORMAL", callback_data=f"setmode_normal_{phone}")],
+        [InlineKeyboardButton(text=f"{'✅ ' if mode=='solo' else ''}👤 SOLO", callback_data=f"setmode_solo_{phone}")],
+        [InlineKeyboardButton(text=f"{'✅ ' if mode=='ghost' else ''}👻 GHOST", callback_data=f"setmode_ghost_{phone}")],
+        [InlineKeyboardButton(text=f"{'✅ ' if mode=='caller' else ''}📞 CALLER", callback_data=f"setmode_caller_{phone}")],
         [InlineKeyboardButton(text="🗑 УДАЛИТЬ", callback_data=f"delacc_{phone}"),
          InlineKeyboardButton(text="🔙", callback_data="my_numbers")]
     ])
-    await cb.message.edit_text(f"⚙️ Настройка **+{phone}**", reply_markup=kb)
+    await cb.message.edit_text(f"⚙️ Настройка **+{phone}**\nТекущий режим: {mode.upper()}", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("setmode_"))
 async def set_mode(cb: types.CallbackQuery):
     _, mode, phone = cb.data.split("_")
     await db_update_mode(phone, mode)
-    await cb.answer(f"✅ Режим: {mode}")
+    await cb.answer(f"✅ Режим {mode} установлен!")
+    await manage_num(cb) # Обновляем меню чтобы появилась галочка
 
 @dp.callback_query(F.data.startswith("delacc_"))
 async def del_acc(cb: types.CallbackQuery):
@@ -541,12 +550,14 @@ async def del_acc(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "config_speed")
 async def conf_speed(cb: types.CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 TURBO", callback_data="setspeed_TURBO")],
-        [InlineKeyboardButton(text="🚶 MEDIUM", callback_data="setspeed_MEDIUM")],
-        [InlineKeyboardButton(text="🐢 SLOW", callback_data="setspeed_SLOW")],
-        [InlineKeyboardButton(text="🔙", callback_data="menu")]
-    ])
+    # Галочка для скорости
+    kb_btns = []
+    for spd in ["TURBO", "MEDIUM", "SLOW"]:
+        prefix = "✅ " if CURRENT_SPEED == spd else ""
+        kb_btns.append([InlineKeyboardButton(text=f"{prefix}{spd}", callback_data=f"setspeed_{spd}")])
+    kb_btns.append([InlineKeyboardButton(text="🔙", callback_data="menu")])
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_btns)
     try: await cb.message.edit_text(f"Скорость: **{CURRENT_SPEED}**", reply_markup=kb)
     except: await cb.answer("Меню открыто")
 
@@ -563,7 +574,7 @@ async def set_spd(cb: types.CallbackQuery):
 @dp.callback_query(F.data == "dashboard")
 async def dash(cb: types.CallbackQuery):
     act = await db_get_all_phones()
-    await cb.message.edit_text(f"📊 **STATUS v32**\nActive: {len(act)}\n{get_sys_status()}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
+    await cb.message.edit_text(f"📊 **STATUS v33**\nActive: {len(act)}\n{get_sys_status()}", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
 
 # --- MANUAL ADD ONLY ---
 @dp.callback_query(F.data == "add_manual")
@@ -592,45 +603,47 @@ async def manual_control_handler(cb: types.CallbackQuery):
     parts = cb.data[1:].split("_")
     action, phone = parts[0], parts[1]
     
-    if phone not in ACTIVE_DRIVERS: return await cb.answer("❌ Сессия закрыта", show_alert=True)
+    if phone not in ACTIVE_DRIVERS: 
+        try: await cb.answer("❌ Сессия закрыта", show_alert=True)
+        except: pass
+        return
+        
     d = ACTIVE_DRIVERS[phone]; drv = d['driver']
     
+    async def safe_reply(text, alert=False):
+        try: await cb.answer(text, show_alert=alert)
+        except: await cb.message.answer(text)
+
     try:
         if action == "1": # Screen
             png = await asyncio.to_thread(drv.get_screenshot_as_png)
             await cb.message.answer_photo(BufferedInputFile(png, "s.png"))
-            await cb.answer()
+            await safe_reply("📸 Готово")
             
-        elif action == "2": # Login Link
-            # Поиск по английскому тексту (самый надежный)
+        elif action == "2": # Login Link (FIXED SELECTORS)
             found = False
-            # Вариант 1: По тексту в span
-            if await safe_click(drv, By.XPATH, "//span[contains(text(), 'Link with phone number')]"): found = True
-            # Вариант 2: По тексту Link with phone
-            elif await safe_click(drv, By.XPATH, "//span[contains(text(), 'Link with phone')]"): found = True
-            # Вариант 3: По testid
+            # Ищем кнопку "Link with phone"
+            if await safe_click(drv, By.XPATH, "//span[contains(text(), 'Link with phone')]"): found = True
+            elif await safe_click(drv, By.XPATH, "//div[contains(text(), 'Link with phone')]"): found = True
             elif await safe_click(drv, By.CSS_SELECTOR, "[data-testid='link-phone']"): found = True
             
-            if found: await cb.answer("✅ Нажал Link!")
-            else: await cb.answer("❌ Кнопка не найдена (проверь ЧЕК)", show_alert=True)
+            if found: await safe_reply("✅ Нажал Link!")
+            else: await safe_reply("❌ Кнопка 'Link' не найдена (проверь ЧЕК)", alert=True)
             
         elif action == "3": # Number Input
             try:
-                # Универсальный поиск инпута
                 inp = drv.find_element(By.CSS_SELECTOR, "input[type='text']")
                 inp.clear()
                 for x in f"+{phone}": inp.send_keys(x); await asyncio.sleep(0.05)
-                await cb.answer("✅ Номер введен")
+                await safe_reply("✅ Номер введен")
             except:
-                await cb.answer("❌ Поле ввода не найдено", show_alert=True)
+                await safe_reply("❌ Поле ввода не найдено", alert=True)
                 
         elif action == "4": # Next Button
-            # Кнопка NEXT часто бывает внутри div
             if await safe_click(drv, By.XPATH, "//div[text()='Next']"):
-                await asyncio.sleep(0.5) # Ждем анимацию
-                await cb.answer("✅ Нажал Next")
+                await safe_reply("✅ Нажал Next")
             else:
-                await cb.answer("❌ Кнопка Next не найдена", show_alert=True)
+                await safe_reply("❌ Кнопка Next не найдена", alert=True)
                 
         elif action == "5": # Save
             await db_save(phone, d['ua'], d['res'], d['plat'])
@@ -642,12 +655,12 @@ async def manual_control_handler(cb: types.CallbackQuery):
             await cb.message.edit_text("Отменено")
             
     except Exception as e:
-        await cb.answer(f"Err: {str(e)[:50]}", show_alert=True)
+        await safe_reply(f"Err: {str(e)[:50]}", alert=True)
 
 async def main():
     await db_init()
     asyncio.create_task(worker_logic())
-    logger.info("🚀 IMPERATOR v32 STARTED")
+    logger.info("🚀 IMPERATOR v33 STARTED")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
