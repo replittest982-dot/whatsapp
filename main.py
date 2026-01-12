@@ -7,787 +7,693 @@ import psutil
 import shutil
 import aiosqlite
 import time
-import json
-import zipfile
-from io import BytesIO
-from datetime import datetime, timedelta
-from logging.handlers import RotatingFileHandler
+import re
+import signal
+from typing import Optional, List, Dict
+from dataclasses import dataclass
+from contextlib import asynccontextmanager
 
-# 🚀 1. UVLOOP (Ускорение для Linux)
+# 🚀 UVLOOP
 if sys.platform != 'win32':
     try:
         import uvloop
         asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-    except ImportError: pass
+    except ImportError: 
+        pass
 
-# --- AIOGRAM & UTILS ---
-from aiogram import Bot, Dispatcher, types, F
+# --- AIOGRAM ---
+from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from faker import Faker
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.exceptions import TelegramBadRequest
 
-# --- MATPLOTLIB (ГРАФИКИ) ---
-import matplotlib
-matplotlib.use('Agg') # Режим без GUI для серверов
-import matplotlib.pyplot as plt
-
-# --- SELENIUM ---
+# --- SELENIUM & THREADING ---
+from functools import partial
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import WebDriverException, TimeoutException
 
 # ==========================================
-# ⚙️ КОНФИГУРАЦИЯ v36.1 PLATINUM (FIXED)
+# 🛡️ 1. CONFIG & SECURITY
 # ==========================================
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID_STR = os.environ.get("ADMIN_ID", "0")
-CHANNEL_ID = "@WhatsAppstatpro"
+@dataclass
+class Config:
+    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+    ADMIN_IDS: List[int] = None
+    CHANNEL_ID: str = os.getenv("CHANNEL_ID", "@WhatsAppstatpro")
+    
+    # Ресурсы
+    MIN_RAM_MB: int = 1000
+    MAX_BROWSERS: int = 1
+    
+    # Пути
+    DB_NAME: str = 'imperator_secure.db'
+    SESSIONS_DIR: str = os.path.abspath("./sessions")
+    TMP_BASE: str = os.path.abspath("./tmp")
+    
+    # Тайминги (сек)
+    TIMEOUT_PAGE_LOAD: int = 60
+    TIMEOUT_ELEMENT: int = 30
+    TIMEOUT_SCREENSHOT: int = 10
+    CALLBACK_ANSWER_TIMEOUT: int = 5
+    
+    def __post_init__(self):
+        admins = os.getenv("ADMIN_IDS", "0")
+        self.ADMIN_IDS = [int(x) for x in admins.split(",") if x.isdigit()]
 
-try:
-    ADMIN_ID = int(ADMIN_ID_STR)
-except ValueError:
-    sys.exit("❌ FATAL: ADMIN_ID должен быть числом!")
+cfg = Config()
 
-if not BOT_TOKEN or len(BOT_TOKEN) < 20:
-    sys.exit("❌ FATAL: Нет токена! Установи переменную BOT_TOKEN.")
+# Проверка токена
+if len(cfg.BOT_TOKEN) < 40:
+    logging.critical("❌ SECURITY ALERT: BOT_TOKEN is missing or too short!")
+    sys.exit(1)
 
-DB_NAME = 'imperator_v36.db'
-SESSIONS_DIR = os.path.abspath("./sessions")
-TMP_BASE = os.path.abspath("./tmp")
-BACKUP_DIR = os.path.abspath("./backups")
-
-# Создаем директории
-for d in [SESSIONS_DIR, TMP_BASE, BACKUP_DIR]:
+# Создание папок
+for d in [cfg.SESSIONS_DIR, cfg.TMP_BASE]:
     os.makedirs(d, exist_ok=True)
 
-# 🚦 SEMAPHORE: Ограничиваем количество одновременных браузеров
-BROWSER_SEMAPHORE = asyncio.Semaphore(1)
-
-# Настройки скоростей (паузы в секундах)
-SPEED_CONFIGS = {
-    "TURBO": { "normal": (180, 300), "ghost": 900, "caller": 1800 },
-    "MEDIUM": { "normal": (300, 600), "ghost": 1800, "caller": 3600 },
-    "SLOW": { "normal": (600, 1500), "ghost": 3600, "caller": 7200 },
-    "BLITZ": { "normal": (60, 180), "ghost": 600, "caller": 1200 },
-    "BUSINESS": { "normal": (900, 1800), "ghost": 5400, "caller": 7200 }, # Только 9:00-18:00
-}
-
-CURRENT_SPEED = "MEDIUM"
-STEALTH_MODE = False
-
-# Глобальные переменные
-ACTIVE_DRIVERS = {}
-CLEANUP_LOCK = asyncio.Lock()
-START_TIME = time.time()
-
 # Логирование
-logger = logging.getLogger("Imperator")
-logger.setLevel(logging.INFO)
-log_formatter = logging.Formatter('%(asctime)s | v36.1 | %(levelname)s | %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | SECURE | %(levelname)s | %(name)s | %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("secure_bot.log", mode='a')
+    ]
+)
+logger = logging.getLogger("Core")
 
-console_handler = logging.StreamHandler()
-console_handler.setFormatter(log_formatter)
-logger.addHandler(console_handler)
-
-file_handler = RotatingFileHandler('imperator.log', maxBytes=10*1024*1024, backupCount=5)
-file_handler.setFormatter(log_formatter)
-logger.addHandler(file_handler)
-
-fake = Faker('ru_RU')
-
-# Профили устройств
-DEVICES = [
-    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36", "res": "1280,720", "plat": "Win32"},
-    {"ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36", "res": "1366,768", "plat": "Linux x86_64"}
-]
-
-# Состояния FSM
-class BotStates(StatesGroup):
-    waiting_phone_manual = State()
-    
-class BroadcastStates(StatesGroup):
-    waiting_text = State()
-    confirm_send = State()
+# Семафор
+BROWSER_SEMAPHORE = asyncio.Semaphore(cfg.MAX_BROWSERS)
+ACTIVE_SESSIONS = {}  # {phone: {'driver': driver, 'lock': asyncio.Lock(), 'pid': int, 'tmp': str}}
+SHUTDOWN_EVENT = asyncio.Event()
 
 # ==========================================
-# 🧠 AI & UTILS
+# 🛡️ 2. SECURITY UTILS (VALIDATION & LIMITS)
 # ==========================================
 
-class SmartAI:
-    def generate(self):
-        hour = datetime.now().hour
-        pool = []
-        if 6 <= hour < 12:
-            pool = ["Доброе утро!", "Привет! Как спалось?", "Начинаем работу?", "Утро доброе"]
-        elif 18 <= hour < 23:
-            pool = ["Привет! Как день прошел?", "Устал уже?", "Вечер добрый", "Скоро домой"]
-        else:
-            pool = ["Как дела?", "На связи", "Тут?", "Работаем", "Есть вопрос", "Привет", "Как сам?"]
+def validate_phone(phone: str) -> bool:
+    """Строгая проверка: только цифры, длина 7-15."""
+    return bool(re.match(r'^\d{7,15}$', phone))
+
+class RateLimitMiddleware(BaseMiddleware):
+    """Простая защита от флуда (Rate Limiting)"""
+    def __init__(self, limit=1.5):
+        self.rate_limit = limit
+        self.last_seen = {}
+
+    async def __call__(self, handler, event, data):
+        if not isinstance(event, Message):
+            return await handler(event, data)
             
-        msg = random.choice(pool)
-        if random.random() < 0.3:
-            msg += random.choice([" :)", " 👍", " ✅", " 👋", " 😉"])
-        return msg
+        user_id = event.from_user.id
+        if user_id in cfg.ADMIN_IDS:
+            return await handler(event, data)
 
-ai_engine = SmartAI()
-
-def get_sys_status():
-    mem = psutil.virtual_memory()
-    uptime_sec = time.time() - START_TIME
-    uptime = str(timedelta(seconds=int(uptime_sec)))
-    return (f"🖥 RAM: {mem.percent}% ({mem.available // (1024*1024)}MB free)\n"
-            f"💻 CPU: {psutil.cpu_percent()}%\n"
-            f"⏱ Uptime: {uptime}")
-
-def check_memory_critical():
-    """Блокирует запуск, если RAM < 250MB"""
-    mem = psutil.virtual_memory()
-    available_mb = mem.available / (1024 * 1024)
-    if available_mb < 250:
-        logger.warning(f"🚨 CRITICAL MEMORY: {int(available_mb)}MB. Pausing tasks.")
-        return True
-    return False
-
-# ==========================================
-# 🗄️ БАЗА ДАННЫХ
-# ==========================================
-async def db_init():
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""CREATE TABLE IF NOT EXISTS accounts 
-                            (phone TEXT PRIMARY KEY, 
-                             status TEXT DEFAULT 'active', 
-                             mode TEXT DEFAULT 'normal',
-                             ua TEXT, res TEXT, plat TEXT,
-                             last_act REAL DEFAULT 0,
-                             total_sent INTEGER DEFAULT 0,
-                             total_calls INTEGER DEFAULT 0,
-                             ban_date REAL,
-                             created_at REAL DEFAULT 0)""")
+        now = time.time()
+        if user_id in self.last_seen:
+            if now - self.last_seen[user_id] < self.rate_limit:
+                return 
         
-        await db.execute("""CREATE TABLE IF NOT EXISTS whitelist 
-                            (user_id INTEGER PRIMARY KEY, 
-                             approved INTEGER DEFAULT 0, 
-                             username TEXT, 
-                             request_time REAL)""")
-        
-        await db.execute("""CREATE TABLE IF NOT EXISTS message_logs 
-                            (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                             sender TEXT, target TEXT, text TEXT, 
-                             timestamp REAL, success INTEGER DEFAULT 1)""")
-        
-        await db.execute("""CREATE TABLE IF NOT EXISTS call_logs 
-                            (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                             caller TEXT, target TEXT, duration INTEGER, 
-                             timestamp REAL, success INTEGER DEFAULT 1)""")
-        await db.commit()
+        self.last_seen[user_id] = now
+        return await handler(event, data)
 
-async def db_get_all_phones():
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT phone FROM accounts WHERE status='active'") as cur:
-            return [r[0] for r in await cur.fetchall()]
-
-async def db_save_account(phone, ua, res, plat):
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("""INSERT INTO accounts (phone, status, mode, ua, res, plat, last_act, created_at) 
-                            VALUES (?, 'active', 'normal', ?, ?, ?, 0, ?) 
-                            ON CONFLICT(phone) DO UPDATE SET status='active', last_act=0""", 
-                         (phone, ua, res, plat, time.time()))
-        await db.commit()
-
-async def db_get_stats_24h():
-    cutoff = time.time() - 86400
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*) FROM message_logs WHERE timestamp > ? AND success=1", (cutoff,)) as cur:
-            msgs = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM call_logs WHERE timestamp > ? AND success=1", (cutoff,)) as cur:
-            calls = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM accounts WHERE status='active'") as cur:
-            active = (await cur.fetchone())[0]
-    return {"msgs": msgs, "calls": calls, "active": active}
-
-# ==========================================
-# 📊 ГРАФИКИ
-# ==========================================
-async def generate_graph():
-    cutoff = time.time() - (24 * 3600)
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT timestamp FROM message_logs WHERE timestamp > ?", (cutoff,)) as cur:
-            rows = await cur.fetchall()
-            
-    hours = [0] * 24
-    for r in rows:
-        h = datetime.fromtimestamp(r[0]).hour
-        hours[h] += 1
-        
-    plt.figure(figsize=(8, 4))
-    plt.bar(range(24), hours, color='#4CAF50', alpha=0.7)
-    plt.xlabel('Час (0-23)')
-    plt.ylabel('Сообщений')
-    plt.title('Активность за 24 часа')
-    plt.grid(axis='y', linestyle='--', alpha=0.3)
-    
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=80)
-    buf.seek(0)
-    plt.close()
-    return buf
-
-# ==========================================
-# 🌐 SELENIUM ENGINE
-# ==========================================
-def get_driver(phone):
-    if check_memory_critical():
-        return None, None, None, None, None
-
-    d_profile = random.choice(DEVICES)
-    ua, res, plat = d_profile['ua'], d_profile['res'], d_profile['plat']
-    
-    options = Options()
-    prof = os.path.join(SESSIONS_DIR, phone)
-    unique_tmp = os.path.join(TMP_BASE, f"tmp_{phone}_{int(time.time())}")
-    os.makedirs(unique_tmp, exist_ok=True)
-
-    options.add_argument(f"--user-data-dir={prof}")
-    options.add_argument(f"--data-path={unique_tmp}")
-    
-    # Оптимизация памяти (Отключение картинок и CSS)
-    options.add_argument("--blink-settings=imagesEnabled=false")
-    options.add_experimental_option("prefs", {
-        "profile.managed_default_content_settings.images": 2,
-        "profile.managed_default_content_settings.stylesheets": 2,
-    })
-    
-    options.add_argument("--lang=en-US")
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--mute-audio")
-    options.add_argument(f"--user-agent={ua}")
-    options.add_argument(f"--window-size={res}")
-
+def memory_guard():
+    """Проверка памяти. True если безопасно."""
     try:
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(45)
-        
-        # JS Injections: Stealth
-        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": """
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                window.navigator.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
-            """
-        })
-        
-        return driver, ua, res, plat, unique_tmp
+        mem = psutil.virtual_memory()
+        free_mb = mem.available / (1024 * 1024)
+        if free_mb < cfg.MIN_RAM_MB:
+            logger.warning(f"🚨 RAM CRITICAL: {int(free_mb)}MB free. Blocking new tasks.")
+            return False
+        return True
     except Exception as e:
-        logger.error(f"❌ Driver Init Error: {e}")
-        return None, None, None, None, None
-
-async def safe_click(driver, by, value, timeout=5):
-    try:
-        wait = WebDriverWait(driver, timeout)
-        elem = wait.until(EC.element_to_be_clickable((by, value)))
-        driver.execute_script("arguments[0].click();", elem)
-        return True
-    except:
+        logger.error(f"Memory check failed: {e}")
         return False
 
-async def human_type(element, text):
-    """Имитация ввода человеком"""
-    for char in text:
-        element.send_keys(char)
-        await asyncio.sleep(random.uniform(0.05, 0.2))
+def kill_zombies():
+    """Убивает только наши процессы Chrome/Driver по сохраненным PID."""
+    logger.info("🧟 Hunting zombie processes...")
+    pids_to_kill = set()
+    
+    # Собираем PID из активных сессий
+    for phone, sess in ACTIVE_SESSIONS.items():
+        if 'pid' in sess and sess['pid']:
+            pids_to_kill.add(sess['pid'])
+    
+    # Убиваем только наши процессы
+    for pid in pids_to_kill:
+        try:
+            proc = psutil.Process(pid)
+            proc.kill()
+            logger.info(f"Killed process {pid}")
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+            logger.debug(f"Could not kill {pid}: {e}")
 
-async def cleanup_driver(phone):
-    async with CLEANUP_LOCK:
-        if phone not in ACTIVE_DRIVERS: return
-        data = ACTIVE_DRIVERS.pop(phone)
-        try: await asyncio.to_thread(data['driver'].quit)
-        except: pass
-        if data['tmp'] and os.path.exists(data['tmp']):
-            shutil.rmtree(data['tmp'], ignore_errors=True)
-
-# ==========================================
-# 🚜 FARM WORKER (SEQUENTIAL)
-# ==========================================
-async def process_one_account(phone, mode, speed_cfg):
-    """Обработка одного аккаунта за раз"""
-    driver = None
+def cleanup_temp_folders():
+    """Очистка временных папок"""
     try:
-        if CURRENT_SPEED == "BUSINESS" and not (9 <= datetime.now().hour <= 18):
-            return
-
-        async with BROWSER_SEMAPHORE:
-            driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
-            if not driver: return
-            
-            ACTIVE_DRIVERS[phone] = {'driver': driver, 'tmp': tmp}
-            
-            if STEALTH_MODE:
-                await asyncio.sleep(random.uniform(2, 5))
-
-            # --- MESSAGE MODE ---
-            if mode in ['normal', 'solo']:
-                targets = await db_get_all_phones()
-                if mode == 'solo': target = phone
-                else: 
-                    target = random.choice([t for t in targets if t != phone]) if len(targets) > 1 else phone
-
-                await asyncio.to_thread(driver.get, f"https://web.whatsapp.com/send?phone={target}")
-                
-                wait = WebDriverWait(driver, 40)
-                inp = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "footer div[contenteditable='true']")))
-                
-                text = ai_engine.generate()
-                await human_type(inp, text)
-                await asyncio.sleep(1)
-                inp.send_keys(Keys.ENTER)
-                await asyncio.sleep(3)
-                
-                async with aiosqlite.connect(DB_NAME) as db:
-                    await db.execute("INSERT INTO message_logs (sender, target, text, timestamp) VALUES (?,?,?,?)",
-                                     (phone, target, text, time.time()))
-                    await db.execute("UPDATE accounts SET total_sent = total_sent + 1, last_act=? WHERE phone=?",
-                                     (time.time(), phone))
-                    await db.commit()
-                logger.info(f"✅ {phone} -> {target}")
-
-            # --- CALLER MODE ---
-            elif mode == 'caller':
-                targets = await db_get_all_phones()
-                if len(targets) > 1:
-                    target = random.choice([t for t in targets if t != phone])
-                    await asyncio.to_thread(driver.get, f"https://web.whatsapp.com/send?phone={target}")
-                    
-                    wait = WebDriverWait(driver, 30)
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "footer")))
-                    
-                    # Клик на кнопку звонка
-                    selectors = [
-                        (By.CSS_SELECTOR, "[aria-label='Voice call']"),
-                        (By.CSS_SELECTOR, "[title='Voice call']"),
-                        (By.XPATH, "//*[@data-icon='voice-call']")
-                    ]
-                    
-                    clicked = False
-                    for s_type, s_val in selectors:
-                        if await safe_click(driver, s_type, s_val):
-                            clicked = True
-                            break
-                    
-                    if clicked:
-                        logger.info(f"📞 CALLING: {phone} -> {target}")
-                        await asyncio.sleep(15) # Длительность звонка
-                        await safe_click(driver, By.CSS_SELECTOR, "[aria-label*='End']")
-                        
-                        async with aiosqlite.connect(DB_NAME) as db:
-                            await db.execute("INSERT INTO call_logs (caller, target, duration, timestamp) VALUES (?,?,?,?)",
-                                             (phone, target, 15, time.time()))
-                            await db.execute("UPDATE accounts SET total_calls = total_calls + 1, last_act=? WHERE phone=?",
-                                             (time.time(), phone))
-                            await db.commit()
-                    
+        if os.path.exists(cfg.TMP_BASE):
+            for item in os.listdir(cfg.TMP_BASE):
+                item_path = os.path.join(cfg.TMP_BASE, item)
+                try:
+                    if os.path.isdir(item_path):
+                        shutil.rmtree(item_path, ignore_errors=True)
+                except Exception as e:
+                    logger.error(f"Failed to remove {item_path}: {e}")
     except Exception as e:
-        logger.error(f"Worker Error {phone}: {e}")
-    finally:
-        await cleanup_driver(phone)
-
-async def farm_loop():
-    logger.info("🚜 FARM LOOP STARTED")
-    while True:
-        try:
-            if check_memory_critical():
-                await asyncio.sleep(60)
-                continue
-            
-            phones = await db_get_all_phones()
-            random.shuffle(phones)
-            
-            for phone in phones:
-                async with aiosqlite.connect(DB_NAME) as db:
-                    async with db.execute("SELECT mode, last_act FROM accounts WHERE phone=?", (phone,)) as cur:
-                        res = await cur.fetchone()
-                        if not res: continue
-                        mode, last_act = res
-                
-                speed_cfg = SPEED_CONFIGS[CURRENT_SPEED]
-                delay = speed_cfg['normal'][0] if mode == 'normal' else speed_cfg['ghost']
-                
-                # ИСПРАВЛЕНИЕ: Если last_act > 0, проверяем задержку. Если 0 - запускаем сразу.
-                if last_act > 0 and (time.time() - last_act < delay):
-                    continue
-                
-                # Запуск обработки
-                await process_one_account(phone, mode, speed_cfg)
-                await asyncio.sleep(5) # Пауза для очистки RAM
-                
-            await asyncio.sleep(10)
-        except Exception as e:
-            logger.error(f"Loop Err: {e}")
-            await asyncio.sleep(30)
-
-async def auto_backup():
-    while True:
-        await asyncio.sleep(86400) # 24ч
-        try:
-            name = f"backup_{datetime.now().strftime('%Y%m%d')}.zip"
-            path = os.path.join(BACKUP_DIR, name)
-            with zipfile.ZipFile(path, 'w') as zf:
-                zf.write(DB_NAME)
-            
-            if ADMIN_ID:
-                await bot.send_document(ADMIN_ID, FSInputFile(path), caption="📦 Auto-Backup")
-            os.remove(path)
-        except Exception as e:
-            logger.error(f"Backup Err: {e}")
+        logger.error(f"Cleanup failed: {e}")
 
 # ==========================================
-# 🤖 BOT UI & HANDLERS
+# ⚡ 3. ASYNC SELENIUM WRAPPER (NON-BLOCKING)
 # ==========================================
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
 
-# --- KEYBOARDS ---
-def kb_main(is_admin=False):
-    btns = [
-        [InlineKeyboardButton(text="📱 МОИ НОМЕРА", callback_data="my_numbers"),
-         InlineKeyboardButton(text="⚙️ КОНФИГ", callback_data="config_speed")],
-        [InlineKeyboardButton(text="➕ ДОБАВИТЬ", callback_data="add_manual"),
-         InlineKeyboardButton(text="📊 СТАТУС", callback_data="dashboard")],
-        [InlineKeyboardButton(text="📤 РАССЫЛКА", callback_data="broadcast"),
-         InlineKeyboardButton(text="💾 БЭКАП", callback_data="backup_menu")]
-    ]
-    if is_admin: btns.append([InlineKeyboardButton(text="🔒 АДМИН", callback_data="admin_panel")])
-    return InlineKeyboardMarkup(inline_keyboard=btns)
+class AsyncDriver:
+    """Обертка для запуска блокирующих методов Selenium в ThreadPool"""
+    
+    def __init__(self, driver, tmp_dir: str):
+        self.driver = driver
+        self.tmp_dir = tmp_dir
+        self.loop = asyncio.get_running_loop()
+        self._closed = False
 
-def kb_manual(phone):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📸 ЧЕК", callback_data=f"m1_{phone}"),
-         InlineKeyboardButton(text="🔗 ВХОД", callback_data=f"m2_{phone}")],
-        [InlineKeyboardButton(text="⌨️ НОМЕР", callback_data=f"m3_{phone}"),
-         InlineKeyboardButton(text="➡️ NEXT", callback_data=f"m4_{phone}")],
-        [InlineKeyboardButton(text="✅ СОХРАНИТЬ", callback_data=f"m5_{phone}"),
-         InlineKeyboardButton(text="🗑 ОТМЕНА", callback_data=f"mc_{phone}")]
-    ])
+    async def get(self, url):
+        if self._closed:
+            raise RuntimeError("Driver already closed")
+        try:
+            await asyncio.wait_for(
+                self.loop.run_in_executor(None, self.driver.get, url),
+                timeout=cfg.TIMEOUT_PAGE_LOAD
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Page load timeout for {url}")
+            raise
 
-# --- AUTH ---
-async def check_perm(user_id):
-    if user_id == ADMIN_ID: return True
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT approved FROM whitelist WHERE user_id=?", (user_id,)) as cur:
-            res = await cur.fetchone()
-            return res and res[0] == 1
+    async def find_element(self, by, value):
+        if self._closed:
+            raise RuntimeError("Driver already closed")
+        return await asyncio.wait_for(
+            self.loop.run_in_executor(None, self.driver.find_element, by, value),
+            timeout=cfg.TIMEOUT_ELEMENT
+        )
 
-async def check_sub(user_id):
+    async def execute_script(self, script, *args):
+        if self._closed:
+            raise RuntimeError("Driver already closed")
+        return await self.loop.run_in_executor(None, self.driver.execute_script, script, *args)
+    
+    async def screenshot(self):
+        if self._closed:
+            raise RuntimeError("Driver already closed")
+        try:
+            return await asyncio.wait_for(
+                self.loop.run_in_executor(None, self.driver.get_screenshot_as_png),
+                timeout=cfg.TIMEOUT_SCREENSHOT
+            )
+        except asyncio.TimeoutError:
+            logger.error("Screenshot timeout")
+            raise
+
+    async def quit(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await asyncio.wait_for(
+                self.loop.run_in_executor(None, self.driver.quit),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Driver quit timeout, force killing")
+        except Exception as e:
+            logger.error(f"Error during quit: {e}")
+        finally:
+            # Всегда удаляем временную папку
+            try:
+                if os.path.exists(self.tmp_dir):
+                    shutil.rmtree(self.tmp_dir, ignore_errors=True)
+            except Exception as e:
+                logger.error(f"Failed to remove tmp dir {self.tmp_dir}: {e}")
+
+    async def wait_click(self, by, value, timeout=10):
+        """Безопасный клик с ожиданием"""
+        if self._closed:
+            raise RuntimeError("Driver already closed")
+            
+        def _blocking_click():
+            try:
+                wait = WebDriverWait(self.driver, timeout)
+                el = wait.until(EC.element_to_be_clickable((by, value)))
+                self.driver.execute_script("arguments[0].click();", el)
+                return True
+            except Exception as e:
+                logger.error(f"Click failed: {e}")
+                return False
+        
+        return await asyncio.wait_for(
+            self.loop.run_in_executor(None, _blocking_click),
+            timeout=timeout + 2
+        )
+
+def get_driver_sync(phone: str):
+    """Синхронная часть создания драйвера (запускается в executor)"""
+    ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    
+    opts = Options()
+    prof = os.path.join(cfg.SESSIONS_DIR, phone)
+    tmp = os.path.join(cfg.TMP_BASE, f"tmp_{phone}_{int(time.time())}")
+    os.makedirs(tmp, exist_ok=True)
+    os.makedirs(prof, exist_ok=True)
+
+    opts.add_argument(f"--user-data-dir={prof}")
+    opts.add_argument(f"--data-path={tmp}")
+    opts.add_argument("--headless=new")
+    opts.add_argument("--no-sandbox")
+    opts.add_argument("--disable-dev-shm-usage")
+    opts.add_argument("--disable-gpu")
+    opts.add_argument(f"--user-agent={ua}")
+    opts.add_argument("--blink-settings=imagesEnabled=false")
+    opts.add_argument("--disable-blink-features=AutomationControlled")
+    opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+    opts.add_experimental_option('useAutomationExtension', False)
+
+    driver = webdriver.Chrome(options=opts)
+    driver.set_page_load_timeout(cfg.TIMEOUT_PAGE_LOAD)
+    
+    # JS Stealth Patch
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+    })
+    
+    # Получаем PID процесса
+    pid = driver.service.process.pid if driver.service and driver.service.process else None
+    
+    return driver, tmp, pid
+
+async def get_async_driver(phone: str):
+    """Асинхронная фабрика драйверов"""
+    if not memory_guard():
+        return None
+        
+    loop = asyncio.get_running_loop()
     try:
-        m = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        return m.status in ['member', 'administrator', 'creator']
-    except: return False
+        driver, tmp, pid = await loop.run_in_executor(None, get_driver_sync, phone)
+        async_driver = AsyncDriver(driver, tmp)
+        return async_driver, tmp, pid
+    except Exception as e:
+        logger.error(f"Driver Init Failed: {e}", exc_info=True)
+        return None, None, None
+
+async def close_session(phone: str):
+    """Безопасное закрытие сессии с очисткой ресурсов"""
+    if phone not in ACTIVE_SESSIONS:
+        return
+    
+    try:
+        sess = ACTIVE_SESSIONS.pop(phone)
+        driver = sess.get('driver')
+        
+        if driver:
+            await driver.quit()
+        
+        # Убиваем процесс если еще жив
+        if 'pid' in sess and sess['pid']:
+            try:
+                proc = psutil.Process(sess['pid'])
+                proc.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        
+        logger.info(f"Session {phone} closed successfully")
+    except Exception as e:
+        logger.error(f"Error closing session {phone}: {e}", exc_info=True)
+
+# ==========================================
+# 🗄️ 4. DATABASE (SECURE)
+# ==========================================
+
+async def db_init():
+    try:
+        async with aiosqlite.connect(cfg.DB_NAME) as db:
+            await db.execute("""CREATE TABLE IF NOT EXISTS accounts 
+                                (phone TEXT PRIMARY KEY, 
+                                 status TEXT DEFAULT 'active', 
+                                 mode TEXT DEFAULT 'normal',
+                                 created_at REAL)""")
+            await db.commit()
+    except Exception as e:
+        logger.error(f"DB init failed: {e}", exc_info=True)
+        raise
+
+async def db_add_account(phone: str):
+    if not validate_phone(phone): 
+        return False
+    try:
+        async with aiosqlite.connect(cfg.DB_NAME) as db:
+            await db.execute("INSERT OR REPLACE INTO accounts (phone, created_at) VALUES (?, ?)", 
+                             (phone, time.time()))
+            await db.commit()
+        return True
+    except Exception as e:
+        logger.error(f"DB add failed: {e}", exc_info=True)
+        return False
+
+async def db_get_all():
+    try:
+        async with aiosqlite.connect(cfg.DB_NAME) as db:
+            async with db.execute("SELECT phone FROM accounts") as cur:
+                return [r[0] for r in await cur.fetchall()]
+    except Exception as e:
+        logger.error(f"DB get_all failed: {e}", exc_info=True)
+        return []
+
+async def db_delete(phone: str):
+    if not validate_phone(phone): 
+        return
+    try:
+        async with aiosqlite.connect(cfg.DB_NAME) as db:
+            await db.execute("DELETE FROM accounts WHERE phone=?", (phone,))
+            await db.commit()
+    except Exception as e:
+        logger.error(f"DB delete failed: {e}", exc_info=True)
+
+# ==========================================
+# 🤖 5. BOT LOGIC
+# ==========================================
+
+bot = Bot(token=cfg.BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
+dp.message.middleware(RateLimitMiddleware(limit=1.5))
+
+class States(StatesGroup):
+    add_phone = State()
+
+async def safe_answer_callback(cb: CallbackQuery, text: str, show_alert: bool = False):
+    """Безопасный ответ на callback с обработкой устаревших query"""
+    try:
+        await asyncio.wait_for(
+            cb.answer(text, show_alert=show_alert),
+            timeout=cfg.CALLBACK_ANSWER_TIMEOUT
+        )
+    except TelegramBadRequest as e:
+        if "query is too old" in str(e):
+            logger.debug(f"Callback expired: {e}")
+        else:
+            logger.error(f"Telegram error: {e}")
+    except asyncio.TimeoutError:
+        logger.warning("Callback answer timeout")
+    except Exception as e:
+        logger.error(f"Callback answer error: {e}", exc_info=True)
+
+async def safe_edit_message(message: Message, text: str, reply_markup=None):
+    """Безопасное редактирование сообщения"""
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            logger.debug("Message not modified")
+        else:
+            logger.error(f"Edit failed: {e}")
+    except Exception as e:
+        logger.error(f"Edit error: {e}", exc_info=True)
 
 @dp.message(Command("start"))
-async def start(msg: types.Message):
-    await db_init()
+async def cmd_start(msg: types.Message):
+    if msg.from_user.id not in cfg.ADMIN_IDS:
+        return
     
-    if not await check_sub(msg.from_user.id):
-        return await msg.answer(f"🔒 Подпишись: {CHANNEL_ID}", 
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ ГОТОВО", callback_data="check_sub")]]))
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить номер", callback_data="add_new")
+    kb.button(text="📋 Список", callback_data="list_all")
+    kb.button(text="🚨 Panic Button (Kill All)", callback_data="panic_kill")
+    kb.adjust(1)
     
-    if await check_perm(msg.from_user.id):
-        await msg.answer("🔱 **IMPERATOR v36.1 PLATINUM**", reply_markup=kb_main(msg.from_user.id == ADMIN_ID))
-    else:
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute("INSERT OR IGNORE INTO whitelist (user_id, username, request_time) VALUES (?,?,?)",
-                             (msg.from_user.id, msg.from_user.username, time.time()))
-            await db.commit()
-        await msg.answer("⏳ Заявка отправлена.")
-        if ADMIN_ID:
-            await bot.send_message(ADMIN_ID, f"👤 Заявка: {msg.from_user.id}", 
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅", callback_data=f"app_{msg.from_user.id}"),
-                     InlineKeyboardButton(text="❌", callback_data=f"rej_{msg.from_user.id}")]
-                ]))
+    ram_free = psutil.virtual_memory().available // (1024**2)
+    active_sessions = len(ACTIVE_SESSIONS)
+    
+    await msg.answer(
+        f"🔒 **SecureBot v38.0 Fixed**\n"
+        f"RAM Free: {ram_free}MB\n"
+        f"Active Sessions: {active_sessions}",
+        reply_markup=kb.as_markup()
+    )
 
-@dp.callback_query(F.data == "check_sub")
-async def sub_check(cb: types.CallbackQuery):
-    if await check_sub(cb.from_user.id):
-        await cb.message.delete()
-        await start(cb.message)
-    else: await cb.answer("❌ Нет подписки", show_alert=True)
+@dp.callback_query(F.data == "add_new")
+async def cb_add(cb: types.CallbackQuery, state: FSMContext):
+    await safe_edit_message(cb.message, "📱 Введите номер (только цифры, 7-15 знаков):")
+    await state.set_state(States.add_phone)
+    await safe_answer_callback(cb, "Ожидаю номер")
 
-@dp.callback_query(F.data.startswith("app_"))
-async def approve_user(cb: types.CallbackQuery):
-    uid = int(cb.data.split("_")[1])
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE whitelist SET approved=1 WHERE user_id=?", (uid,))
-        await db.commit()
-    await bot.send_message(uid, "✅ Доступ получен!")
-    await cb.message.edit_text(f"✅ Одобрен: {uid}")
-
-@dp.callback_query(F.data.startswith("rej_"))
-async def reject_user(cb: types.CallbackQuery):
-    uid = int(cb.data.split("_")[1])
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("DELETE FROM whitelist WHERE user_id=?", (uid,))
-        await db.commit()
-    await cb.message.edit_text(f"❌ Отклонен: {uid}")
-
-# --- ADMIN PANEL ---
-@dp.callback_query(F.data == "admin_panel")
-async def admin_panel(cb: types.CallbackQuery):
-    if cb.from_user.id != ADMIN_ID: return
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT COUNT(*) FROM whitelist WHERE approved=0") as cur: reqs = (await cur.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM whitelist WHERE approved=1") as cur: usrs = (await cur.fetchone())[0]
-    await cb.message.edit_text(f"🔒 **ADMIN**\nReqs: {reqs} | Users: {usrs}", 
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
-
-# --- MANUAL ADD ---
-@dp.callback_query(F.data == "add_manual")
-async def add_manual(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.edit_text("📱 Введи номер (без +):")
-    await state.set_state(BotStates.waiting_phone_manual)
-
-@dp.message(BotStates.waiting_phone_manual)
-async def process_phone(msg: types.Message, state: FSMContext):
+@dp.message(States.add_phone)
+async def input_phone(msg: types.Message, state: FSMContext):
     phone = "".join(filter(str.isdigit, msg.text))
-    if not (7 <= len(phone) <= 15): return await msg.answer("❌ 7-15 цифр!")
+    
+    if not validate_phone(phone):
+        return await msg.answer("❌ Некорректный формат номера. Попробуйте еще раз.")
+    
+    if phone in ACTIVE_SESSIONS:
+        return await msg.answer(f"⚠️ Номер {phone} уже активен!")
+    
+    await db_add_account(phone)
     await state.clear()
     
-    s = await msg.answer("🚀 Запуск...")
-    async with BROWSER_SEMAPHORE:
-        driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, phone)
-        if not driver: return await s.edit_text("💥 Crash / Memory Limit")
-        
-        ACTIVE_DRIVERS[phone] = {'driver': driver, 'ua': ua, 'res': res, 'plat': plat, 'tmp': tmp}
-        await asyncio.to_thread(driver.get, "https://web.whatsapp.com")
-        await s.edit_text(f"✅ Пульт +{phone}", reply_markup=kb_manual(phone))
-
-@dp.callback_query(lambda c: c.data and c.data.startswith("m") and "_" in c.data)
-async def manual_handler(cb: types.CallbackQuery):
-    action, phone = cb.data[1:].split("_")
-    if phone not in ACTIVE_DRIVERS: return await cb.answer("❌ Сессия закрыта", show_alert=True)
-    drv = ACTIVE_DRIVERS[phone]['driver']
+    status_msg = await msg.answer(f"🚀 Инициализация драйвера для {phone}...")
     
     try:
-        if action == "1": # Screen
-            png = await asyncio.to_thread(drv.get_screenshot_as_png)
-            await cb.message.answer_photo(BufferedInputFile(png, "s.png"))
+        async with BROWSER_SEMAPHORE:
+            drv, tmp, pid = await get_async_driver(phone)
             
-        elif action == "2": # Link (4 Strategies)
-            found = False
-            for txt in ["Link with phone", "Link with phone number", "Привязать", "Войти по номеру", "S'associer"]:
-                xp = f"//div[contains(text(), '{txt}')] | //span[contains(text(), '{txt}')]"
-                if await safe_click(drv, By.XPATH, xp): found = True; break
+            if not drv:
+                return await status_msg.edit_text("❌ Не удалось запустить драйвер (OOM or Crash).")
             
-            if not found: found = await safe_click(drv, By.CSS_SELECTOR, "[aria-label*='phone']")
-            if not found:
-                btns = drv.find_elements(By.TAG_NAME, "button")
-                if len(btns)>=2: drv.execute_script("arguments[0].click()", btns[-1]); found=True
-            if not found:
-                drv.execute_script("const t=[...document.querySelectorAll('div,span,button')].find(e=>e.innerText&&(e.innerText.includes('phone')||e.innerText.includes('номер')));if(t)t.click()")
-                found=True
+            ACTIVE_SESSIONS[phone] = {
+                'driver': drv, 
+                'tmp': tmp, 
+                'pid': pid,
+                'created': time.time()
+            }
             
-            if found: await cb.answer("✅ Clicked")
-            else:
-                png = await asyncio.to_thread(drv.get_screenshot_as_png) 
-                await cb.message.answer_photo(BufferedInputFile(png, "err.png"), caption="❌ Not Found")
+            try:
+                await status_msg.edit_text(f"⏳ Загрузка WhatsApp Web для {phone}...")
+                await drv.get("https://web.whatsapp.com")
+                
+                kb = InlineKeyboardBuilder()
+                kb.button(text="📸 Скрин", callback_data=f"scr_{phone}")
+                kb.button(text="🚪 Закрыть", callback_data=f"exit_{phone}")
+                kb.adjust(1)
+                
+                await status_msg.edit_text(
+                    f"✅ Браузер запущен: +{phone}\n"
+                    f"PID: {pid}",
+                    reply_markup=kb.as_markup()
+                )
+                
+            except Exception as e:
+                logger.error(f"WhatsApp load error: {e}", exc_info=True)
+                await close_session(phone)
+                await status_msg.edit_text(f"❌ Ошибка при загрузке WhatsApp: {e}")
+                
+    except Exception as e:
+        logger.error(f"Session init error: {e}", exc_info=True)
+        await status_msg.edit_text(f"❌ Критическая ошибка: {e}")
 
-        elif action == "3": # Input
-            t = None
-            for i in drv.find_elements(By.CSS_SELECTOR, "input"):
-                if i.is_displayed(): t = i; break
-            
-            if t:
-                t.clear()
-                # HUMAN TYPING
-                for c in f"+{phone}":
-                    t.send_keys(c)
-                    await asyncio.sleep(random.uniform(0.05, 0.15))
-                await cb.answer("✅ Введено")
-            else: await cb.answer("❌ Input not found", show_alert=True)
-
-        elif action == "4": # Next
-            found = False
-            for txt in ["Next", "Далее", "Siguiente", "下一步"]:
-                if await safe_click(drv, By.XPATH, f"//div[text()='{txt}'] | //button[text()='{txt}']"):
-                    found = True; break
-            
-            if not found:
-                btns = drv.find_elements(By.TAG_NAME, "button")
-                for btn in btns:
-                    if btn.is_displayed() and btn.is_enabled():
-                        drv.execute_script("arguments[0].click()", btn)
-                        found = True; break
-            
-            if found: await cb.answer("➡️ Next")
-            else: await cb.answer("❌ Next not found", show_alert=True)
-
-        elif action == "5": # Save
-            d = ACTIVE_DRIVERS[phone]
-            await db_save_account(phone, d['ua'], d['res'], d['plat'])
-            await cleanup_driver(phone)
-            await cb.message.edit_text("✅ Сохранено! В работе.")
-
-        elif action == "c":
-            await cleanup_driver(phone)
-            await cb.message.edit_text("Отмена")
-            
-    except Exception as e: await cb.answer(f"Err: {e}", show_alert=True)
-
-# --- DASHBOARD ---
-@dp.callback_query(F.data == "dashboard")
-async def dashboard(cb: types.CallbackQuery):
-    stats = await db_get_stats_24h()
-    graph = await generate_graph()
-    txt = (f"📊 **STATUS**\n"
-           f"SMS: {stats['msgs']} | Calls: {stats['calls']}\n"
-           f"Active: {stats['active']}\n"
-           f"{get_sys_status()}")
-    await cb.message.answer_photo(BufferedInputFile(graph.read(), "g.png"), caption=txt,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙", callback_data="menu")]]))
-
-# --- BROADCAST (REAL) ---
-@dp.callback_query(F.data == "broadcast")
-async def bc_start(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.edit_text("📝 Введите текст:")
-    await state.set_state(BroadcastStates.waiting_text)
-
-@dp.message(BroadcastStates.waiting_text)
-async def bc_text(msg: types.Message, state: FSMContext):
-    text = msg.text
-    phones = await db_get_all_phones()
+@dp.callback_query(F.data.startswith("scr_"))
+async def cb_screenshot(cb: types.CallbackQuery):
+    phone = cb.data.split("_", 1)[1]
     
-    if not phones:
-        return await msg.answer("❌ Нет активных номеров")
+    if not validate_phone(phone):
+        return await safe_answer_callback(cb, "❌ Некорректный номер", show_alert=True)
     
-    await msg.answer(f"🚀 Запуск рассылки на {len(phones)} номеров...")
-    success = 0
+    if phone not in ACTIVE_SESSIONS:
+        return await safe_answer_callback(cb, "❌ Сессия не активна", show_alert=True)
     
-    for sender in phones:
-        # Шлем самому себе для теста (или рандом)
-        targets = [p for p in phones if p != sender]
-        if not targets: target = sender
-        else: target = random.choice(targets)
+    await safe_answer_callback(cb, "📸 Создаю скриншот...")
+    
+    sess = ACTIVE_SESSIONS[phone]
+    drv = sess['driver']
+    
+    try:
+        png_data = await drv.screenshot()
+        await cb.message.answer_photo(
+            BufferedInputFile(png_data, f"screen_{phone}.png"),
+            caption=f"📸 Скриншот: +{phone}"
+        )
+    except asyncio.TimeoutError:
+        await cb.message.answer("❌ Таймаут создания скриншота")
+    except Exception as e:
+        logger.error(f"Screenshot error: {e}", exc_info=True)
+        await cb.message.answer(f"❌ Ошибка: {str(e)[:100]}")
+
+@dp.callback_query(F.data.startswith("exit_"))
+async def cb_exit(cb: types.CallbackQuery):
+    phone = cb.data.split("_", 1)[1]
+    
+    if phone not in ACTIVE_SESSIONS:
+        return await safe_answer_callback(cb, "Уже остановлено")
+    
+    await safe_answer_callback(cb, "🛑 Останавливаю...")
+    
+    try:
+        await close_session(phone)
+        await safe_edit_message(cb.message, f"🛑 Сессия {phone} остановлена.")
+    except Exception as e:
+        logger.error(f"Exit error: {e}", exc_info=True)
+        await safe_edit_message(cb.message, f"⚠️ Ошибка остановки: {e}")
+
+@dp.callback_query(F.data == "list_all")
+async def cb_list(cb: types.CallbackQuery):
+    await safe_answer_callback(cb, "📋 Загружаю список...")
+    
+    try:
+        phones = await db_get_all()
         
-        driver = None
+        if not phones:
+            return await safe_edit_message(cb.message, "📋 Список пуст")
+        
+        text = "📋 **Аккаунты:**\n\n"
+        for phone in phones:
+            status = "🟢 Active" if phone in ACTIVE_SESSIONS else "⚪️ Inactive"
+            text += f"• {phone} — {status}\n"
+        
+        kb = InlineKeyboardBuilder()
+        kb.button(text="🔙 Назад", callback_data="start")
+        
+        await safe_edit_message(cb.message, text, reply_markup=kb.as_markup())
+    except Exception as e:
+        logger.error(f"List error: {e}", exc_info=True)
+        await safe_answer_callback(cb, f"Ошибка: {e}", show_alert=True)
+
+@dp.callback_query(F.data == "start")
+async def cb_start(cb: types.CallbackQuery):
+    await safe_answer_callback(cb, "🏠")
+    
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Добавить номер", callback_data="add_new")
+    kb.button(text="📋 Список", callback_data="list_all")
+    kb.button(text="🚨 Panic Button (Kill All)", callback_data="panic_kill")
+    kb.adjust(1)
+    
+    ram_free = psutil.virtual_memory().available // (1024**2)
+    active_sessions = len(ACTIVE_SESSIONS)
+    
+    await safe_edit_message(
+        cb.message,
+        f"🔒 **SecureBot v38.0 Fixed**\n"
+        f"RAM Free: {ram_free}MB\n"
+        f"Active Sessions: {active_sessions}",
+        reply_markup=kb.as_markup()
+    )
+
+@dp.callback_query(F.data == "panic_kill")
+async def cb_panic(cb: types.CallbackQuery):
+    if cb.from_user.id not in cfg.ADMIN_IDS: 
+        return
+    
+    await safe_answer_callback(cb, "💀 KILLING ALL...", show_alert=True)
+    await safe_edit_message(cb.message, "💀 KILLING ALL PROCESSES...")
+    
+    # Закрываем все сессии
+    sessions_to_close = list(ACTIVE_SESSIONS.keys())
+    for phone in sessions_to_close:
         try:
-            async with BROWSER_SEMAPHORE:
-                driver, ua, res, plat, tmp = await asyncio.to_thread(get_driver, sender)
-                if not driver: continue
-                ACTIVE_DRIVERS[sender] = {'driver': driver, 'tmp': tmp}
-                
-                await asyncio.to_thread(driver.get, f"https://web.whatsapp.com/send?phone={target}")
-                
-                wait = WebDriverWait(driver, 40)
-                inp = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "footer div[contenteditable='true']")))
-                
-                await human_type(inp, text)
-                await asyncio.sleep(1)
-                inp.send_keys(Keys.ENTER)
-                await asyncio.sleep(2)
-                
-                success += 1
-                logger.info(f"📤 BC: {sender} -> {target}")
-                
-        except Exception as e: logger.error(f"BC Err {sender}: {e}")
-        finally: await cleanup_driver(sender)
-        
-    await msg.answer(f"✅ Рассылка завершена: {success}/{len(phones)}")
-    await state.clear()
-
-# --- BACKUP ---
-@dp.callback_query(F.data == "backup_menu")
-async def backup_menu(cb: types.CallbackQuery):
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT * FROM accounts") as cur: rows = await cur.fetchall()
-    data = [{"phone": r[0]} for r in rows]
-    b = json.dumps(data, indent=2).encode()
-    await cb.message.answer_document(BufferedInputFile(b, "accounts.json"), caption="📥 Backup")
-
-# --- MANAGE NUMBERS ---
-@dp.callback_query(F.data == "menu")
-async def menu(cb: types.CallbackQuery):
-    await cb.message.edit_text("Меню", reply_markup=kb_main(cb.from_user.id == ADMIN_ID))
-
-@dp.callback_query(F.data == "my_numbers")
-async def my_numbers(cb: types.CallbackQuery):
-    phones = await db_get_all_phones()
-    kb = [[InlineKeyboardButton(text=f"+{p}", callback_data=f"nop_{p}")] for p in phones]
-    kb.append([InlineKeyboardButton(text="🔙", callback_data="menu")])
-    await cb.message.edit_text("📂 Выбери номер для настройки:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data.startswith("nop_"))
-async def manage_number(cb: types.CallbackQuery):
-    phone = cb.data.split("_")[1]
-    async with aiosqlite.connect(DB_NAME) as db:
-        async with db.execute("SELECT mode FROM accounts WHERE phone=?", (phone,)) as cur:
-            res = await cur.fetchone()
-            mode = res[0] if res else "normal"
-            
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{'✅ ' if mode=='normal' else ''}🔥 NORMAL", callback_data=f"mode_normal_{phone}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if mode=='solo' else ''}👤 SOLO", callback_data=f"mode_solo_{phone}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if mode=='ghost' else ''}👻 GHOST", callback_data=f"mode_ghost_{phone}")],
-        [InlineKeyboardButton(text=f"{'✅ ' if mode=='caller' else ''}📞 CALLER", callback_data=f"mode_caller_{phone}")],
-        [InlineKeyboardButton(text="🗑 УДАЛИТЬ", callback_data=f"del_{phone}"),
-         InlineKeyboardButton(text="🔙", callback_data="my_numbers")]
-    ])
-    await cb.message.edit_text(f"⚙️ Настройка +{phone}\nРежим: {mode.upper()}", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("mode_"))
-async def set_mode(cb: types.CallbackQuery):
-    _, mode, phone = cb.data.split("_")
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("UPDATE accounts SET mode=? WHERE phone=?", (mode, phone))
-        await db.commit()
-    await cb.answer(f"✅ {mode.upper()}")
-    await manage_number(cb)
-
-@dp.callback_query(F.data.startswith("del_"))
-async def del_number(cb: types.CallbackQuery):
-    phone = cb.data.split("_")[1]
-    async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute("DELETE FROM accounts WHERE phone=?", (phone,))
-        await db.commit()
-    shutil.rmtree(os.path.join(SESSIONS_DIR, phone), ignore_errors=True)
-    await cb.answer("🗑 Удалено")
-    await my_numbers(cb)
-
-@dp.callback_query(F.data == "config_speed")
-async def config(cb: types.CallbackQuery):
-    kb = [[InlineKeyboardButton(text=f"{'✅ ' if k==CURRENT_SPEED else ''}{k}", callback_data=f"spd_{k}")] for k in SPEED_CONFIGS]
-    kb.append([InlineKeyboardButton(text="🔙", callback_data="menu")])
-    await cb.message.edit_text(f"⚙️ Скорость: {CURRENT_SPEED}", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-
-@dp.callback_query(F.data.startswith("spd_"))
-async def set_spd(cb: types.CallbackQuery):
-    global CURRENT_SPEED
-    CURRENT_SPEED = cb.data.split("_")[1]
-    await config(cb)
-
-# ==========================================
-# 🚀 ЗАПУСК
-# ==========================================
-async def main():
-    await db_init()
-    asyncio.create_task(farm_loop())
-    asyncio.create_task(auto_backup())
+            await close_session(phone)
+        except Exception as e:
+            logger.error(f"Error killing {phone}: {e}")
     
-    logger.info("🚀 IMPERATOR v36.1 PLATINUM STARTED")
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    kill_zombies()
+    cleanup_temp_folders()
+    
+    await asyncio.sleep(1)
+    await cb.message.answer("✅ Система очищена.")
+
+# ==========================================
+# 🚀 GRACEFUL SHUTDOWN
+# ==========================================
+
+async def shutdown(signal_name=None):
+    """Graceful shutdown с очисткой всех ресурсов"""
+    if signal_name:
+        logger.info(f"Received exit signal {signal_name}")
+    
+    SHUTDOWN_EVENT.set()
+    
+    # Закрываем все сессии
+    logger.info("Closing all active sessions...")
+    sessions_to_close = list(ACTIVE_SESSIONS.keys())
+    for phone in sessions_to_close:
+        try:
+            await close_session(phone)
+        except Exception as e:
+            logger.error(f"Error during shutdown of {phone}: {e}")
+    
+    # Убиваем зомби
+    kill_zombies()
+    cleanup_temp_folders()
+    
+    # Отменяем все задачи
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    logger.info(f"Cancelling {len(tasks)} outstanding tasks")
+    
+    for task in tasks:
+        task.cancel()
+    
+    await asyncio.gather(*tasks, return_exceptions=True)
+    
+    logger.info("Shutdown complete")
+
+def handle_signal(sig):
+    """Обработчик сигналов"""
+    asyncio.create_task(shutdown(sig))
+
+# ==========================================
+# 🚀 MAIN LOOP
+# ==========================================
+
+async def main():
+    logger.info("🔒 Starting SecureBot v38.0 Fixed...")
+    
+    # Очистка перед стартом
+    kill_zombies()
+    cleanup_temp_folders()
+    
+    try:
+        await db_init()
+    except Exception as e:
+        logger.critical(f"Failed to initialize database: {e}")
+        return
+    
+    # Регистрация обработчиков сигналов
+    if sys.platform != 'win32':
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
+    
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Starting polling...")
+        await dp.start_polling(bot, handle_signals=False)
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received")
+    except Exception as e:
+        logger.critical(f"Main Loop Crash: {e}", exc_info=True)
+    finally:
+        await shutdown("main_finally")
+        await bot.session.close()
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     try:
         asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Stopped")
+    except KeyboardInterrupt:
+        logger.info("Exiting...")
