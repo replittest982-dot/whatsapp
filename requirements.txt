@@ -3,3 +3,11 @@ aiosqlite==0.20.0
 selenium==4.27.1
 psutil==6.1.0
 uvloop==0.21.0; sys_platform != 'win32'
+redis==5.2.1
+openai==1.51.2
+matplotlib==3.9.2
+pillow==11.1.0
+numpy==2.2.2
+qrcode==8.2
+python-dotenv==1.0.1
+aiofiles==24.1.0
