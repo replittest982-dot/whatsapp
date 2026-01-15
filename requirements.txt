@@ -1,28 +1,7 @@
-# Ядро и Асинхронность
 aiogram==3.15.0
-aiosqlite==0.20.0
-asyncio==3.4.3
-uvloop==0.21.0; sys_platform != 'win32'
-apscheduler==3.10.4
-
-# ИИ (Google Gemini)
-google-generativeai==0.8.3
-
-# Браузерная автоматизация
-selenium==4.27.1
-webdriver-manager==4.0.2
-
-# Безопасность и Спуфинг
-cryptography==43.0.0
-faker==33.1.0
-
-# Системные и Мониторинг
-psutil==6.1.1
-python-dotenv==1.0.1
-redis==5.2.1
-
-# Работа с медиа и графикой
-matplotlib==3.9.2
-pillow==11.1.0
-qrcode==8.2
-gtts==2.5.4
+playwright==1.40.0
+aiosqlite==0.19.0
+google-generativeai==0.3.2
+faker==22.5.1
+psutil==5.9.8
+uvloop==0.19.0; sys_platform != 'win32'
