@@ -1,68 +1,52 @@
+# 1. Используем легкий образ Python
 FROM python:3.11-slim
 
-# Env 2026
+# 2. Настройка переменных окружения
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     CHROME_BIN=/usr/bin/google-chrome \
     TZ=Asia/Almaty \
-    DISPLAY="" \
-    PYTHONDASHBOARD=0
+    DISPLAY=""
 
-# System deps (оптимизировано)
+# 3. Установка системных зависимостей и шрифтов (Критично для WA Web)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Chrome deps
     wget curl unzip gnupg ca-certificates jq tzdata \
-    libx11-6 libx11-xcb1 libxcb1 libxcomposite1 libxcursor1 \
-    libxdamage1 libxext6 libxfixes3 libxi6 libxrandr2 libxrender1 \
-    libxss1 libxtst6 libnss3 libnspr4 libasound2 libatk1.0-0 \
-    libatk-bridge2.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 \
-    libglib2.0-0 libpango-1.0-0 libpangocairo-1.0-0 \
-    fonts-liberation fonts-noto-color-emoji \
-    # Redis client
-    redis-tools \
-    # Build
+    # Библиотеки для Chrome
+    libnss3 libatk-bridge2.0-0 libcups2 libdrm2 libgbm1 libasound2 \
+    libxcomposite1 libxdamage1 libxrandr2 libpango-1.0-0 libxkbcommon0 \
+    # Шрифты (Важно, чтобы ИИ видел текст на странице без квадратиков)
+    fonts-ipafont-gothic fonts-wqy-zenhei fonts-kacst fonts-freefont-ttf \
+    # Инструменты сборки
     build-essential pkg-config libffi-dev \
-    && ln -fs /usr/share/zoneinfo/$TZ /etc/localtime \
-    && dpkg-reconfigure -f noninteractive tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-# Chrome + Driver (твой код идеален!)
+# 4. Установка Google Chrome Stable
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends google-chrome-stable \
-    && CHROME_VER=$(google-chrome --version | awk '{print $3}') \
-    && MAJOR=$(echo $CHROME_VER | cut -d. -f1) \
-    && LATEST_DRIVER_URL=$(curl -s "https://googlechromelabs.github.io/chrome-for-testing/latest-versions-per-milestone-with-downloads.json" | jq -r ".milestones.\"$MAJOR\".downloads.chromedriver[] | select(.platform == \"linux64\") | .url") \
-    && wget -q -O /tmp/chromedriver.zip "$LATEST_DRIVER_URL" \
-    && unzip -o /tmp/chromedriver.zip -d /tmp/ \
-    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
-    && chmod +x /usr/local/bin/chromedriver \
-    && rm -rf /tmp/* /var/lib/apt/lists/*
+    && apt-get install -y google-chrome-stable \
+    && rm -rf /var/lib/apt/lists/*
 
+# 5. Рабочая директория
 WORKDIR /app
 
-# Multi-stage pip (быстрее)
+# 6. Установка Python зависимостей (используем кэш для скорости)
 COPY requirements.txt .
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir --upgrade pip && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy app
-COPY main.py .
-COPY .env .env
+# 7. Копирование кода
+COPY . .
 
-# Volumes + Permissions (FIXED)
-RUN mkdir -p /app/{sessions,tmp,backups,logs} && \
-    chmod -R 777 /app && \
-    chown -R 1000:1000 /app
+# 8. Создание необходимых директорий и права доступа
+RUN mkdir -p /app/sessions /app/media /app/logs /app/tmp_chrome_data && \
+    chmod -R 777 /app
 
-# Healthcheck
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD pgrep -f "python.*main.py" || exit 1
+# 9. Healthcheck для мониторинга живого процесса
+HEALTHCHECK --interval=60s --timeout=15s --start-period=10s --retries=3 \
+    CMD pgrep -f "python main.py" || exit 1
 
-# Chrome sandbox OFF (security)
-USER 1000
+# 10. Запуск от не-root пользователя (рекомендуется для безопасности)
+# USER 1000 
 
-EXPOSE 8080
 CMD ["python", "main.py"]
