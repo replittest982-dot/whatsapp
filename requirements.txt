@@ -1,7 +1,9 @@
-aiogram==3.15.0
-playwright==1.40.0
-aiosqlite==0.19.0
-google-generativeai==0.3.2
-faker==22.5.1
-psutil==5.9.8
-uvloop==0.19.0; sys_platform != 'win32'
+aiogram==3.16.0
+playwright==1.49.0
+aiosqlite==0.20.0
+psutil==6.1.0
+faker==33.1.0
+pytesseract==0.3.10
+Pillow==11.0.0
+google-generativeai==0.8.3
+uvloop==0.21.0; sys_platform != 'win32'
