@@ -2,8 +2,8 @@ version: '3.8'
 
 services:
   imperator:
-    image: mcr.microsoft.com/playwright/python:v1.40.0-jammy
-    container_name: imperator_v38
+    build: .
+    container_name: imperator_v39
     restart: unless-stopped
     
     environment:
@@ -12,32 +12,27 @@ services:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - INSTANCE_ID=1
       - TOTAL_INSTANCES=1
+      # Playwright env
+      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
     
     volumes:
-      - ./:/app
       - ./sessions:/app/sessions
       - ./logs:/app/logs
+      - ./backups:/app/backups
+      - playwright-cache:/ms-playwright
     
-    working_dir: /app
+    # ✅ Shared memory для Chromium (КРИТИЧНО!)
+    shm_size: '4gb'
     
     # ✅ Оптимально для 50GB RAM
     deploy:
       resources:
         limits:
-          memory: 48G      # Оставляем 2GB для системы
-          cpus: '15'       # 15 ядер (если доступны)
+          memory: 48G
+          cpus: '15'
         reservations:
-          memory: 10G      # Минимум 10GB
-          cpus: '4'        # Минимум 4 ядра
-    
-    # ✅ Shared memory для Chromium (критично!)
-    shm_size: '4gb'
-    
-    command: >
-      bash -c "
-      pip install --no-cache-dir -r requirements.txt &&
-      python -u main.py
-      "
+          memory: 10G
+          cpus: '4'
     
     # Healthcheck
     healthcheck:
@@ -47,10 +42,15 @@ services:
       retries: 3
       start_period: 30s
 
-# ✅ ОПЦИОНАЛЬНО: Если хотите масштабировать на несколько нод
-  # imperator_node2:
-  #   extends: imperator
-  #   container_name: imperator_v38_node2
-  #   environment:
-  #     - INSTANCE_ID=2
-  #     - TOTAL_INSTANCES=2
+volumes:
+  playwright-cache:
+    driver: local
+
+# ✅ МАСШТАБИРОВАНИЕ (раскомментировать для 2+ нод)
+#  imperator_node2:
+#    extends:
+#      service: imperator
+#    container_name: imperator_v39_node2
+#    environment:
+#      - INSTANCE_ID=2
+#      - TOTAL_INSTANCES=2
