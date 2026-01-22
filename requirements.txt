@@ -1,11 +1,9 @@
 aiogram==3.16.0
-playwright==1.49.0
-playwright-stealth==1.0.6
 aiosqlite==0.20.0
-psutil==6.1.0
-faker==33.1.0
+playwright==1.40.0
+playwright-stealth==1.0.6
+google-generativeai==0.3.2
+Pillow==10.2.0
 pytesseract==0.3.10
-Pillow==11.0.0
-google-generativeai==0.8.3
-# Ускоритель асинхронности для Linux
-uvloop==0.21.0; sys_platform != 'win32'
+psutil==5.9.8
+Faker==22.0.0
