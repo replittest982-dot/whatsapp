@@ -1,9 +1,25 @@
-aiogram==3.16.0
-aiosqlite==0.20.0
+# Aiogram
+aiogram==3.15.0
+
+# Playwright
 playwright==1.40.0
 playwright-stealth==1.0.6
+
+# DB
+aiosqlite==0.20.0
+
+# Gemini
 google-generativeai==0.3.2
-Pillow==10.2.0
-pytesseract==0.3.10
-psutil==5.9.8
-Faker==22.0.0
+
+# Utils
+psutil==6.1.0
+Pillow==10.4.0
+pytesseract==0.3.13
+Faker==30.8.2
+
+# Analytics
+matplotlib==3.9.3
+numpy==2.2.1
+
+# Async (Linux only)
+uvloop==0.21.0; sys_platform != 'win32'
