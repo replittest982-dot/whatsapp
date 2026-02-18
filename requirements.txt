@@ -1,12 +1,10 @@
-# Bot
-aiogram==3.15.0
-
-# Browser
-playwright==1.40.0
-playwright-stealth==1.0.6
-
-# DB
-aiosqlite==0.20.0
-
-# Async (Linux only)
-uvloop==0.21.0; sys_platform != 'win32'
+aiogram
+playwright
+playwright-stealth
+aiosqlite
+pytesseract
+matplotlib
+psutil
+faker
+google-generativeai
+uvloop
