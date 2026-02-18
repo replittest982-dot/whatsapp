@@ -1,42 +1,33 @@
 version: '3.8'
-
 services:
   imperator:
     build: .
-    container_name: imperator_v39
+    container_name: imperator_lite
     restart: unless-stopped
-    
+
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_ID=${ADMIN_ID}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - INSTANCE_ID=1
-      - TOTAL_INSTANCES=1
-      # Playwright env
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-    
+
     volumes:
       - ./sessions:/app/sessions
-      - ./logs:/app/logs
-      - ./backups:/app/backups
       - playwright-cache:/ms-playwright
-    
-    # ✅ Shared memory для Chromium (КРИТИЧНО!)
-    shm_size: '4gb'
-    
-    # ✅ Оптимально для 50GB RAM
+
+    # Для 2GB RAM: shm уменьшаем до 512mb
+    shm_size: '512mb'
+
     deploy:
       resources:
         limits:
-          memory: 48G
-          cpus: '15'
+          memory: 1800M
+          cpus: '2'
         reservations:
-          memory: 10G
-          cpus: '4'
-    
-    # Healthcheck
+          memory: 512M
+          cpus: '0.5'
+
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/logs/node_1.log') else 1)"]
+      test: ["CMD", "python", "-c", "import aiosqlite; print('ok')"]
       interval: 60s
       timeout: 10s
       retries: 3
@@ -45,12 +36,3 @@ services:
 volumes:
   playwright-cache:
     driver: local
-
-# ✅ МАСШТАБИРОВАНИЕ (раскомментировать для 2+ нод)
-#  imperator_node2:
-#    extends:
-#      service: imperator
-#    container_name: imperator_v39_node2
-#    environment:
-#      - INSTANCE_ID=2
-#      - TOTAL_INSTANCES=2
