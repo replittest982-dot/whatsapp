@@ -1,6 +1,5 @@
 FROM python:3.10-slim
 
-# Системные зависимости для OCR + Playwright Chromium
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-rus \
@@ -32,11 +31,13 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Устанавливаем Playwright браузер в кастомный путь
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
 RUN playwright install-deps chromium
 
 COPY . .
+
+# [FIX]: Создаем файл БД заранее, чтобы volume в docker-compose монтировался корректно
+RUN touch /app/imp17.db
 
 CMD ["python", "main.py"]
