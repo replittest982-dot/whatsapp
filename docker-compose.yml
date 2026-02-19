@@ -10,13 +10,14 @@ services:
       - ADMIN_ID=${ADMIN_ID}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+      - FARM_MIN_MINUTES=5
+      - FARM_MAX_MINUTES=15
 
     volumes:
       - ./sessions:/app/sessions
       - ./imp17.db:/app/imp17.db
       - playwright-cache:/ms-playwright
 
-    # 8GB RAM — даём контейнеру до 4GB, остальное ОС
     shm_size: '1gb'
 
     deploy:
