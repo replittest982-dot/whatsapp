@@ -2,26 +2,28 @@ version: '3.8'
 services:
   imperator:
     build: .
-    container_name: imperator_lite
+    container_name: imperator_v17
     restart: unless-stopped
 
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - ADMIN_ID=${ADMIN_ID}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
     volumes:
       - ./sessions:/app/sessions
+      - ./imp17.db:/app/imp17.db
       - playwright-cache:/ms-playwright
 
-    # Для 2GB RAM: shm уменьшаем до 512mb
-    shm_size: '512mb'
+    # 8GB RAM — даём контейнеру до 4GB, остальное ОС
+    shm_size: '1gb'
 
     deploy:
       resources:
         limits:
-          memory: 1800M
-          cpus: '2'
+          memory: 4000M
+          cpus: '4'
         reservations:
           memory: 512M
           cpus: '0.5'
