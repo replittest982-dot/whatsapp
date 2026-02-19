@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Установка системных зависимостей для OCR и графиков
+# Системные зависимости для OCR + Playwright Chromium
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-rus \
@@ -19,18 +19,24 @@ RUN apt-get update && apt-get install -y \
     libxdamage1 \
     libxext6 \
     libxfixes3 \
-    librandr2 \
+    libxrandr2 \
     libgbm1 \
     libpango-1.0-0 \
     libcairo2 \
     libasound2 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY . .
+COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Устанавливаем Playwright браузер в кастомный путь
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN playwright install chromium
 RUN playwright install-deps chromium
+
+COPY . .
 
 CMD ["python", "main.py"]
