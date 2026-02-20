@@ -1,27 +1,23 @@
 """
-⚡ IMPERATOR v17.2 — Playwright Edition (Вацап бот В3)
-- Пишет только сам себе.
-- Отправляет уведомление в Telegram, когда успешно зашел.
-- Максимально оптимизировано потребление памяти (браузеры закрываются на время сна + Memory Guard).
-- v17.2: Скриншоты QR и кода привязки отправляются ПОЛНЫМ ЭКРАНОМ, а не обрезанными кусками.
+🔱 IMPERATOR v26.0 — WARLORD EDITION (Вацап бот В3)
+- Движок: Selenium WebDriver (Chrome).
+- Архитектура: Неблокирующий (asyncio.to_thread для Selenium).
+- Защита: Aggressive Cleanup (убийство зомби-процессов), Memory Guard (RAM < 200MB).
+- Фичи: Whitelist (система доступа), Полные скриншоты QR/кода, Hive Mind (Соло фарм).
 """
 
 import asyncio
 import os
 import logging
 import random
+import shutil
+import psutil
 import sys
 import re
 from datetime import datetime
-from typing import Optional
 
-import uvloop
 import aiosqlite
-import psutil
 from faker import Faker
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext
-from playwright_stealth import stealth_async
-import google.generativeai as genai
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -30,649 +26,395 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# ── CONFIG ───────────────────────────────────────────────
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.keys import Keys
 
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID     = int(os.environ.get("ADMIN_ID", 0))
-INSTANCE_ID  = int(os.environ.get("INSTANCE_ID", 1))
-GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")
-DB           = "imp17.db"
-SESS_DIR     = os.path.join(os.getcwd(), "sessions")
+# ==========================================
+# ⚙️ КОНФИГУРАЦИЯ
+# ==========================================
+
+BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID        = int(os.environ.get("ADMIN_ID", 0))
+INSTANCE_ID     = int(os.environ.get("INSTANCE_ID", 1))
+DB_NAME         = "warlord26.db"
+SESS_DIR        = os.path.join(os.getcwd(), "sessions")
+TMP_DIR         = os.path.join(os.getcwd(), "tmp_chrome")
+
 os.makedirs(SESS_DIR, exist_ok=True)
+os.makedirs(TMP_DIR, exist_ok=True)
 
-# НАСТРОЙКА ВРЕМЕНИ (В МИНУТАХ)
-FARM_MIN_MINUTES = int(os.environ.get("FARM_MIN_MINUTES", 5))
-FARM_MAX_MINUTES = int(os.environ.get("FARM_MAX_MINUTES", 15))
-
-FARM_MIN = FARM_MIN_MINUTES * 60
-FARM_MAX = FARM_MAX_MINUTES * 60
-
-FAKE_NAMES = ["Алексей", "Максим", "Иван", "Дмитрий", "Сергей", "Артём", "Владимир", "Андрей"]
-FAKE_BIOS  = ["Всё хорошо 🌿", "На связи", "Работаю 💼", "Не беспокоить 🔕", "Живу и радуюсь ☀️"]
-
-DEVICES = [
-    {"ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", "w": 1920, "h": 1080, "plat": "Win32", "mobile": False},
-    {"ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36", "w": 1440, "h": 900,  "plat": "MacIntel", "mobile": False},
-    {"ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36", "w": 1366, "h": 768,  "plat": "Linux x86_64", "mobile": False},
-]
+FARM_MIN        = 5 * 60
+FARM_MAX        = 15 * 60
+BROWSER_LIMIT   = asyncio.Semaphore(2)  # Не более 2 браузеров одновременно
+ACTIVE_DRIVERS  = {}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-log  = logging.getLogger(__name__)
-fake = Faker("ru_RU")
+logger = logging.getLogger("WARLORD")
+fake = Faker('ru_RU')
 
-# ── GLOBALS ──────────────────────────────────────────────
-bot: Bot = None
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-_CONTEXTS: dict[str, tuple] = {}
-FARM_TASKS: dict[str, asyncio.Task] = {}
-_gemini_model = None
 
-# ── MEMORY GUARD ─────────────────────────────────────────
+# ==========================================
+# 🛡 SYSTEM UTILS (ANTI-CRASH)
+# ==========================================
+
+def aggressive_cleanup():
+    """Убивает зависшие процессы Chrome и очищает временные папки."""
+    logger.info("🧹 Запуск Aggressive Cleanup...")
+    killed = 0
+    for proc in psutil.process_iter(['pid', 'name']):
+        try:
+            name = proc.info['name'].lower()
+            if 'chrome' in name or 'chromedriver' in name:
+                proc.kill()
+                killed += 1
+        except Exception:
+            pass
+    
+    if os.path.exists(TMP_DIR):
+        shutil.rmtree(TMP_DIR, ignore_errors=True)
+        os.makedirs(TMP_DIR, exist_ok=True)
+        
+    logger.info(f"✅ Убито зомби-процессов: {killed}")
 
 def is_memory_critical() -> bool:
-    """Возвращает True, если свободной памяти меньше 200MB"""
-    mem = psutil.virtual_memory()
-    free_mb = mem.available / (1024 * 1024)
+    """True, если свободной RAM меньше 200MB."""
+    free_mb = psutil.virtual_memory().available / (1024 * 1024)
     if free_mb < 200:
-        log.warning(f"⚠️ КРИТИЧЕСКИЙ УРОВЕНЬ ПАМЯТИ: Доступно {free_mb:.2f} MB")
+        logger.warning(f"⚠️ КРИТИЧЕСКАЯ ПАМЯТЬ: Доступно {free_mb:.2f} MB")
         return True
     return False
 
-# ── GEMINI ───────────────────────────────────────────────
-
-def get_gemini():
-    global _gemini_model
-    if not _gemini_model and GEMINI_KEY:
-        genai.configure(api_key=GEMINI_KEY)
-        _gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-    return _gemini_model
-
-async def gen_message() -> str:
-    """Генерирует осмысленное короткое сообщение через Gemini"""
-    model = get_gemini()
-    if model:
-        try:
-            resp = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: model.generate_content(
-                    "Напиши одно короткое бытовое сообщение как будто пишешь себе заметку "
-                    "или напоминание. 1-2 предложения, по-русски, без кавычек, без эмодзи. "
-                    "Например: нужно купить хлеб и молоко. Или: позвонить маме вечером."
-                )
-            )
-            text = resp.text.strip()
-            if text:
-                return text
-        except Exception as e:
-            log.warning(f"Gemini error: {e}")
-
-    fallbacks = [
-        "не забыть купить продукты",
-        "позвонить завтра утром",
-        "оплатить счёт до пятницы",
-        "записаться к врачу на следующей неделе",
-        "забрать посылку с почты",
-        "напомнить себе про встречу в среду",
-    ]
-    return random.choice(fallbacks)
-
-# ── DATABASE (aiosqlite) ──────────────────────────────────
+# ==========================================
+# 💾 БАЗА ДАННЫХ (aiosqlite)
+# ==========================================
 
 async def db_init():
-    async with aiosqlite.connect(DB) as db:
+    async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""CREATE TABLE IF NOT EXISTS accounts (
             phone TEXT PRIMARY KEY,
-            ua TEXT, res TEXT, plat TEXT,
+            user_agent TEXT,
             status TEXT DEFAULT 'active',
             last_active TEXT
         )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS whitelist (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            approved INTEGER DEFAULT 0
+        )""")
+        # Добавляем админа в вайтлист по умолчанию
+        if ADMIN_ID:
+            await db.execute("INSERT OR IGNORE INTO whitelist (user_id, username, approved) VALUES (?, 'admin', 1)", (ADMIN_ID,))
         await db.commit()
 
-async def db_save(phone, ua, res, plat):
-    async with aiosqlite.connect(DB) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO accounts VALUES (?,?,?,?,'active',?)",
-            (phone, ua, res, plat, datetime.now().isoformat())
-        )
+async def db_check_access(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute("SELECT approved FROM whitelist WHERE user_id=?", (user_id,)) as cur:
+            res = await cur.fetchone()
+            return bool(res and res[0] == 1)
+
+async def db_request_access(user_id: int, username: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR IGNORE INTO whitelist (user_id, username, approved) VALUES (?, ?, 0)", (user_id, username))
         await db.commit()
 
-async def db_get(phone):
-    async with aiosqlite.connect(DB) as db:
-        async with db.execute("SELECT ua,res,plat FROM accounts WHERE phone=?", (phone,)) as cur:
-            return await cur.fetchone()
-
-async def db_all_active():
-    async with aiosqlite.connect(DB) as db:
+async def db_get_active_phones():
+    async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT phone FROM accounts WHERE status='active'") as cur:
-            return [r[0] for r in await cur.fetchall()]
+            return [row[0] for row in await cur.fetchall()]
 
-async def db_touch(phone):
-    async with aiosqlite.connect(DB) as db:
-        await db.execute("UPDATE accounts SET last_active=? WHERE phone=?",
-                         (datetime.now().isoformat(), phone))
+async def db_save_account(phone: str, ua: str):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO accounts (phone, user_agent, status, last_active) VALUES (?, ?, 'active', ?)",
+            (phone, ua, datetime.now().isoformat())
+        )
         await db.commit()
 
-# ── PLAYWRIGHT BROWSER ────────────────────────────────────
+# ==========================================
+# 🌐 SELENIUM ENGINE
+# ==========================================
 
-async def make_context(phone: str, playwright) -> tuple[BrowserContext, dict]:
-    cfg = await db_get(phone)
-    if cfg:
-        ua, res, plat = cfg
-        w, h = map(int, res.split(","))
-        dev = {"ua": ua, "w": w, "h": h, "plat": plat, "mobile": False}
-    else:
-        dev = random.choice(DEVICES)
-        await db_save(phone, dev["ua"], f"{dev['w']},{dev['h']}", dev["plat"])
+def get_random_ua():
+    uas = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    ]
+    return random.choice(uas)
 
-    sess_path = os.path.join(SESS_DIR, phone)
-    os.makedirs(sess_path, exist_ok=True)
+def create_driver(phone: str) -> webdriver.Chrome:
+    profile_path = os.path.join(SESS_DIR, phone)
+    tmp_path = os.path.join(TMP_DIR, f"tmp_{phone}")
+    os.makedirs(tmp_path, exist_ok=True)
 
-    browser: Browser = await playwright.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--js-flags=--max-old-space-size=256",
-        ]
-    )
-
-    context: BrowserContext = await browser.new_context(
-        user_agent=dev["ua"],
-        viewport={"width": dev["w"], "height": dev["h"]},
-        locale="ru-RU",
-        timezone_id="Asia/Almaty",
-        permissions=["geolocation"],
-        geolocation={"latitude": 43.2389, "longitude": 76.8897},
-        storage_state=os.path.join(sess_path, "state.json") if os.path.exists(
-            os.path.join(sess_path, "state.json")) else None,
-        extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9"}
-    )
-
-    context.on("page", lambda page: asyncio.ensure_future(stealth_async(page)))
-    return context, dev
-
-async def save_session(context: BrowserContext, phone: str):
-    sess_path = os.path.join(SESS_DIR, phone)
-    os.makedirs(sess_path, exist_ok=True)
-    await context.storage_state(path=os.path.join(sess_path, "state.json"))
-
-async def schedule_context_cleanup(phone: str, delay: int = 300):
-    """Очищает контекст авторизации, если пользователь забил и не ввел код/QR."""
-    await asyncio.sleep(delay)
-    if phone in _CONTEXTS:
-        ctx_data = _CONTEXTS.pop(phone, None)
-        if ctx_data:
-            context, page, pw = ctx_data
-            try:
-                await context.close()
-                await pw.stop()
-                log.info(f"[CLEANUP] Контекст {phone} очищен по таймауту (5 минут).")
-            except Exception as e:
-                log.error(f"[CLEANUP] Ошибка очистки {phone}: {e}")
-
-# ── HUMAN TYPING ─────────────────────────────────────────
-
-async def htype(page: Page, selector: str, text: str):
-    await page.click(selector)
-    for ch in text:
-        # Шанс 4% на ошибку и исправление (как просил в ТЗ)
-        if random.random() < 0.04:
-            wrong = random.choice("фывапролдж")
-            await page.keyboard.type(wrong, delay=random.randint(40, 150))
-            await asyncio.sleep(random.uniform(0.2, 0.5))
-            await page.keyboard.press("Backspace")
-            await asyncio.sleep(random.uniform(0.1, 0.3))
-        await page.keyboard.type(ch, delay=random.randint(40, 220))
-
-# ── WHATSAPP HELPERS ──────────────────────────────────────
-
-async def is_logged_in(page: Page) -> bool:
-    try:
-        await page.wait_for_selector("#pane-side", timeout=5000)
-        return True
-    except Exception:
-        return False
-
-async def wait_logged_in(page: Page, timeout=120) -> bool:
-    try:
-        await page.wait_for_selector("#pane-side", timeout=timeout * 1000)
-        return True
-    except Exception:
-        return False
-
-async def get_pairing_code(page: Page) -> str:
-    try:
-        await asyncio.sleep(3)
-        spans = await page.query_selector_all(
-            "div[data-ref] span, div[class*='pairing'] span, div[role='button'] span"
-        )
-        parts = []
-        for s in spans:
-            t = (await s.text_content() or "").strip()
-            if t and len(t) <= 4 and (t.isalnum() or t.isdigit()):
-                parts.append(t)
-        code = "".join(parts)[:8]
-        if len(code) >= 4:
-            return code
-        return await ocr_code(page)
-    except Exception as e:
-        log.warning(f"get_pairing_code: {e}")
-        return ""
-
-async def ocr_code(page: Page) -> str:
-    try:
-        import pytesseract
-        from PIL import Image
-        import io
-        screenshot = await page.screenshot(type="png")
-        img = Image.open(io.BytesIO(screenshot))
-        text = pytesseract.image_to_string(
-            img,
-            config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
-        )
-        match = re.search(r'[A-Z0-9]{4}[-\s]?[A-Z0-9]{4}', text.upper())
-        if match:
-            return match.group().replace("-", "").replace(" ", "")
-    except Exception as e:
-        log.warning(f"OCR error: {e}")
-    return ""
-
-async def enter_phone_and_get_code(page: Page, phone: str) -> str:
-    try:
-        btn = await page.wait_for_selector(
-            "span[role='button']:has-text('Link with phone'), "
-            "span[role='button']:has-text('номер'), "
-            "div[role='button']:has-text('Link')",
-            timeout=15000
-        )
-        await btn.click()
-        await asyncio.sleep(1.5)
-    except Exception:
-        pass
-
-    # Ядерный метод JS (как в ТЗ)
-    await page.evaluate(f"""
-        var inp = document.querySelector('input[type="text"],input[inputmode="numeric"]');
-        if(inp){{
-            inp.focus();
-            var nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');
-            nativeSet.set.call(inp,'{phone}');
-            inp.dispatchEvent(new Event('input',{{bubbles:true}}));
-            inp.dispatchEvent(new Event('change',{{bubbles:true}}));
-        }}
-    """)
-    await asyncio.sleep(1)
-
-    try:
-        nxt = await page.wait_for_selector(
-            "div[role='button']:has-text('Next'), div[role='button']:has-text('Далее')",
-            timeout=5000
-        )
-        await nxt.click()
-    except Exception:
-        pass
-
-    return await get_pairing_code(page)
-
-async def change_profile(page: Page):
-    try:
-        await page.click("div[title='Меню'], div[title='Menu']")
-        await asyncio.sleep(0.7)
-        await page.click("text=Профиль, text=Profile")
-        await asyncio.sleep(1.5)
-
-        name_field = await page.wait_for_selector("div[contenteditable='true']", timeout=5000)
-        await name_field.triple_click()
-        await page.keyboard.type(random.choice(FAKE_NAMES), delay=random.randint(50, 180))
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(0.5)
-
-        fields = await page.query_selector_all("div[contenteditable='true']")
-        if len(fields) >= 2:
-            await fields[1].triple_click()
-            await page.keyboard.type(random.choice(FAKE_BIOS), delay=random.randint(50, 180))
-            await page.keyboard.press("Enter")
-
-        log.info("Профиль обновлён")
-    except Exception as e:
-        log.warning(f"change_profile: {e}")
-
-async def send_to_self(page: Page, phone: str):
-    text = await gen_message()
-    await page.goto(f"https://web.whatsapp.com/send?phone={phone}", wait_until="domcontentloaded")
-    inp_sel = "div[contenteditable='true'][data-tab]"
-    await page.wait_for_selector(inp_sel, timeout=20000)
-    await asyncio.sleep(random.uniform(1, 2.5))
-    await htype(page, inp_sel, text)
-    await asyncio.sleep(random.uniform(0.3, 0.8))
-    await page.keyboard.press("Enter")
-    log.info(f"Отправлено (Сам себе): «{text[:50]}»")
-
-def is_banned_html(html: str) -> bool:
-    src = html.lower()
-    return any(w in src for w in ["номер заблокирован", "is banned", "account is not allowed", "spam"])
-
-# ── SCREENSHOT HELPERS (ИСПРАВЛЕНО НА ПОЛНЫЙ ЭКРАН) ───────
-
-async def take_qr_screenshot(page: Page) -> bytes:
-    """Делает скриншот ВСЕЙ страницы с QR-кодом."""
-    await asyncio.sleep(5)  # ждём прогрузки QR
-    try:
-        # Просто ждём появления canvas на странице, чтобы убедиться, что он отрисован
-        await page.wait_for_selector("canvas", timeout=5000)
-    except Exception:
-        pass
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument(f"--user-data-dir={profile_path}")
+    options.add_argument(f"--crash-dumps-dir={tmp_path}")
+    options.add_argument(f"--user-agent={get_random_ua()}")
+    options.add_argument("--window-size=1920,1080")
     
-    log.info("[SCREENSHOT] Делаем скриншот полной страницы для QR")
-    # full_page=True гарантирует, что скриншот не обрежется до размеров одного элемента
-    return await page.screenshot(type="png", full_page=True)
+    # Скрытие автоматизации (Stealth)
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    options.add_argument("--disable-blink-features=AutomationControlled")
 
+    service = Service()
+    driver = webdriver.Chrome(service=service, options=options)
+    
+    # JS Injection (Timezone + Platform)
+    driver.execute_cdp_cmd('Emulation.setTimezoneOverride', {'timezoneId': 'Asia/Almaty'})
+    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    return driver
 
-async def take_code_screenshot(page: Page) -> bytes:
-    """Делает скриншот ВСЕЙ страницы с кодом привязки."""
-    await asyncio.sleep(5)  # ждём прогрузки кода
+# ==========================================
+# 🧠 WHATSAPP ЛОГИКА (В потоках)
+# ==========================================
+
+def _take_screenshot(driver: webdriver.Chrome) -> bytes:
+    """Скриншот на весь экран."""
+    return driver.get_screenshot_as_png()
+
+def _check_logged_in(driver: webdriver.Chrome) -> bool:
     try:
-        # Ждём появления блока с кодом
-        await page.wait_for_selector("div[data-ref], div[class*='pairing']", timeout=5000)
-    except Exception:
-        pass
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "pane-side")))
+        return True
+    except:
+        return False
 
-    log.info("[SCREENSHOT] Делаем скриншот полной страницы для кода")
-    return await page.screenshot(type="png", full_page=True)
+def _human_type(element, text: str):
+    for char in text:
+        if random.random() < 0.04:
+            element.send_keys(random.choice("фывапролдж"))
+            time.sleep(random.uniform(0.1, 0.3))
+            element.send_keys(Keys.BACKSPACE)
+        element.send_keys(char)
+        time.sleep(random.uniform(0.05, 0.2))
 
-# ── FARM WORKER ───────────────────────────────────────────
+def sync_whatsapp_login_qr(phone: str) -> tuple[bool, bytes]:
+    """Генерирует QR и возвращает (успех, скриншот). Работает синхронно."""
+    driver = None
+    try:
+        driver = create_driver(phone)
+        driver.get("https://web.whatsapp.com")
+        if _check_logged_in(driver):
+            return True, b""
+        
+        # Ждем QR код
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, "canvas")))
+        time.sleep(3) # Даем отрисоваться
+        scr = _take_screenshot(driver)
+        return False, scr
+    except Exception as e:
+        logger.error(f"QR Error {phone}: {e}")
+        return False, b""
+    finally:
+        if driver: driver.quit()
 
-async def farm_worker(phone: str):
-    log.info(f"[FARM] Старт воркера: {phone}")
-    change_counter = 0
-    first_run = True
+def sync_wait_for_login(phone: str) -> bool:
+    """Ждет входа 2 минуты после сканирования."""
+    driver = None
+    try:
+        driver = create_driver(phone)
+        driver.get("https://web.whatsapp.com")
+        WebDriverWait(driver, 120).until(EC.presence_of_element_located((By.ID, "pane-side")))
+        return True
+    except:
+        return False
+    finally:
+        if driver: driver.quit()
 
-    while True:
-        # Memory Guard перед запуском браузера
-        while is_memory_critical():
-            log.warning("[FARM] Пауза воркера из-за нехватки памяти (ждем 30 сек)...")
-            await asyncio.sleep(30)
+def sync_farm_step(phone: str):
+    """Единичный шаг прогрева (соло: смена био, сообщение себе)."""
+    driver = None
+    try:
+        driver = create_driver(phone)
+        driver.get("https://web.whatsapp.com")
+        if not _check_logged_in(driver):
+            logger.warning(f"[FARM] {phone} сессия вылетела.")
+            return False
 
-        try:
-            async with async_playwright() as pw:
-                context, dev = await make_context(phone, pw)
-                page = await context.new_page()
-                await stealth_async(page)
+        # Пишем сами себе (Избранное)
+        driver.get(f"https://web.whatsapp.com/send?phone={phone}")
+        inp = WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.CSS_SELECTOR, "div[contenteditable='true'][data-tab]")))
+        time.sleep(random.uniform(2, 4))
+        
+        msg = fake.sentence(nb_words=5)
+        _human_type(inp, msg)
+        time.sleep(0.5)
+        inp.send_keys(Keys.ENTER)
+        time.sleep(2)
+        logger.info(f"[FARM] {phone} отправил: {msg}")
+        return True
+    except Exception as e:
+        logger.error(f"[FARM] Ошибка {phone}: {e}")
+        return False
+    finally:
+        if driver: driver.quit()
 
-                await page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
+# ==========================================
+# 🤖 BOT HANDLERS & FSM
+# ==========================================
 
-                if not await is_logged_in(page):
-                    log.warning(f"[FARM] {phone} — сессия истекла")
-                    if bot:
-                        await bot.send_message(ADMIN_ID, f"⚠️ Аккаунт {phone} вылетел (сессия истекла).")
-                    await context.close()
-                    break
-
-                if first_run:
-                    if bot:
-                        await bot.send_message(
-                            ADMIN_ID,
-                            f"🟢 WhatsApp [{phone}] успешно в сети!\n"
-                            f"Интервал: {FARM_MIN_MINUTES}-{FARM_MAX_MINUTES} мин.\n"
-                            f"Режим: Пишу сам себе."
-                        )
-                    first_run = False
-
-                html = await page.content()
-                if is_banned_html(html):
-                    log.error(f"[FARM] {phone} BANNED")
-                    if bot:
-                        await bot.send_message(ADMIN_ID, f"❌ Аккаунт {phone} ЗАБЛОКИРОВАН!")
-                    await context.close()
-                    break
-
-                change_counter += 1
-                if change_counter % 20 == 0:
-                    await change_profile(page)
-
-                await send_to_self(page, phone)
-                await save_session(context, phone)
-                await db_touch(phone)
-
-                await context.close()
-
-        except Exception as e:
-            log.error(f"[FARM] {phone} ошибка: {e}")
-
-        pause = random.randint(FARM_MIN, FARM_MAX)
-        log.info(f"[FARM] {phone} — следующий запуск через {pause//60} мин")
-        await asyncio.sleep(pause)
-
-# ── BOT HANDLERS ──────────────────────────────────────────
-
-class S(StatesGroup):
-    phone = State()
-    code  = State()
-
-def main_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Войти по номеру", callback_data="login_phone")],
-        [InlineKeyboardButton(text="📷 Войти по QR",      callback_data="login_qr")],
-        [InlineKeyboardButton(text="📋 Аккаунты",        callback_data="accounts")],
-    ])
+class AuthState(StatesGroup):
+    wait_phone_qr = State()
+    wait_confirm  = State()
 
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message):
-    if msg.from_user.id != ADMIN_ID:
-        return await msg.answer("⛔ Нет доступа.")
-    await msg.answer(
-        f"⚡ *Imperator v17.2 (Вацап бот В3)*\n"
-        f"Интервал работы: {FARM_MIN_MINUTES} - {FARM_MAX_MINUTES} минут.\n"
-        f"Выберите действие:",
-        parse_mode="Markdown",
-        reply_markup=main_kb()
-    )
+    user_id = msg.from_user.id
+    if not await db_check_access(user_id):
+        await db_request_access(user_id, msg.from_user.username or "unknown")
+        await msg.answer("⛔ Нет доступа. Заявка отправлена администратору.")
+        if ADMIN_ID:
+            await bot.send_message(
+                ADMIN_ID, 
+                f"🛡 Новый запрос доступа от @{msg.from_user.username} ({user_id}).\nИспользуй /allow {user_id}"
+            )
+        return
 
-@dp.callback_query(F.data == "accounts")
-async def cb_accounts(cb: types.CallbackQuery):
-    accs = await db_all_active()
-    if accs:
-        text = f"📋 Активных: *{len(accs)}*\n" + "\n".join(f"  • `{p}`" for p in accs)
-    else:
-        text = "Аккаунтов нет."
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📷 Привязать по QR", callback_data="add_qr")],
+        [InlineKeyboardButton(text="📋 Список аккаунтов", callback_data="list_accs")]
+    ])
+    await msg.answer("🔱 *IMPERATOR v26.0 WARLORD*\nДоступ разрешен. Выберите действие:", parse_mode="Markdown", reply_markup=kb)
+
+@dp.message(Command("allow"))
+async def cmd_allow(msg: types.Message):
+    if msg.from_user.id != ADMIN_ID:
+        return
+    try:
+        target_id = int(msg.text.split()[1])
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("UPDATE whitelist SET approved=1 WHERE user_id=?", (target_id,))
+            await db.commit()
+        await msg.answer(f"✅ Доступ разрешен пользователю {target_id}")
+        await bot.send_message(target_id, "✅ Администратор одобрил вам доступ. Нажмите /start")
+    except:
+        await msg.answer("Использование: /allow <user_id>")
+
+@dp.callback_query(F.data == "list_accs")
+async def cb_list(cb: types.CallbackQuery):
+    accs = await db_get_active_phones()
+    text = f"📋 Активных сессий: {len(accs)}\n" + "\n".join(f"• `{p}`" for p in accs) if accs else "Пусто."
     await cb.message.answer(text, parse_mode="Markdown")
     await cb.answer()
 
-@dp.callback_query(F.data == "login_qr")
-async def cb_qr(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("📷 Введите номер телефона (для привязки папки сессии):")
-    await state.set_state(S.phone)
-    await state.update_data(mode="qr")
+@dp.callback_query(F.data == "add_qr")
+async def cb_add_qr(cb: types.CallbackQuery, state: FSMContext):
+    await cb.message.answer("Введите номер телефона (для создания папки профиля, напр. 77001234567):")
+    await state.set_state(AuthState.wait_phone_qr)
     await cb.answer()
 
-@dp.callback_query(F.data == "login_phone")
-async def cb_phone(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("📱 Введите номер (без +, пример: `77001234567`):", parse_mode="Markdown")
-    await state.set_state(S.phone)
-    await state.update_data(mode="phone")
-    await cb.answer()
-
-# ── ГЛАВНЫЙ ОБРАБОТЧИК ───────────────────────────────────
-
-@dp.message(S.phone)
-async def handle_phone(msg: types.Message, state: FSMContext):
-    data  = await state.get_data()
-    phone = msg.text.strip().replace("+", "")
-    mode  = data.get("mode", "phone")
-
+@dp.message(AuthState.wait_phone_qr)
+async def process_qr_phone(msg: types.Message, state: FSMContext):
+    phone = re.sub(r"\D", "", msg.text)
     if is_memory_critical():
-        await msg.answer("⚠️ Сервер перегружен (нет свободной ОЗУ). Попробуйте позже.")
+        return await msg.answer("⚠️ Сервер перегружен. Попробуйте позже.")
+
+    status = await msg.answer("⏳ Запускаю браузер и генерирую QR (около 15-20 сек)...")
+    
+    # 💥 Вызов Selenium в отдельном потоке, чтобы бот не вис
+    is_logged, screenshot = await asyncio.to_thread(sync_whatsapp_login_qr, phone)
+    
+    if is_logged:
+        await db_save_account(phone, get_random_ua())
+        await status.edit_text("✅ Этот номер уже авторизован! Фарм продолжится автоматически.")
         await state.clear()
         return
 
-    status_msg = await msg.answer("⏳ Запускаю браузер...")
-
-    try:
-        pw = await async_playwright().start()
-        context, dev = await make_context(phone, pw)
-        page = await context.new_page()
-        await stealth_async(page)
-        await page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-
-        # ── Уже залогинен — просто запускаем фарм ────────
-        if await is_logged_in(page):
-            await save_session(context, phone)
-            await context.close()
-            await pw.stop()
-            await status_msg.edit_text("✅ Сессия актуальна! Фарм запущен.")
-            _start_farm(phone)
-            await state.clear()
-            return
-
-        # ── Режим QR ──────────────────────────────────────
-        if mode == "qr":
-            await status_msg.edit_text("⏳ Ожидаю появления QR-кода...")
-
-            try:
-                screenshot_bytes = await take_qr_screenshot(page)
-                await msg.answer_photo(
-                    photo=BufferedInputFile(screenshot_bytes, filename="qr.png"),
-                    caption=(
-                        "📷 Откройте WhatsApp → *Связанные устройства* → *Привязать устройство*\n"
-                        "Отсканируйте QR-код выше.\n\n"
-                        "⏳ Ожидаю подтверждения входа (до 2 мин)..."
-                    ),
-                    parse_mode="Markdown"
-                )
-                await status_msg.delete()
-            except Exception as e:
-                log.warning(f"[QR] Не удалось отправить скриншот: {e}")
-                await status_msg.edit_text(
-                    "📷 Откройте WhatsApp → *Связанные устройства* → *Привязать устройство*\n"
-                    "Отсканируйте QR-код.\n\n⏳ Ожидаю входа (до 2 мин)...",
-                    parse_mode="Markdown"
-                )
-
-            if await wait_logged_in(page, 120):
-                await save_session(context, phone)
-                await context.close()
-                await pw.stop()
-                await msg.answer("✅ Вход по QR выполнен! Фарм запущен.")
-                _start_farm(phone)
-            else:
-                await context.close()
-                await pw.stop()
-                await msg.answer("❌ Timeout. QR устарел, попробуйте снова /start")
-            await state.clear()
-            return
-
-        # ── Режим Phone (код привязки) ────────────────────
-        await status_msg.edit_text("⏳ Запрашиваю код привязки...")
-        code = await enter_phone_and_get_code(page, phone)
-
-        if not code:
-            await asyncio.sleep(3)
-            code = await get_pairing_code(page)
-
-        if code:
-            screenshot_sent = False
-            try:
-                screenshot_bytes = await take_code_screenshot(page)
-                await msg.answer_photo(
-                    photo=BufferedInputFile(screenshot_bytes, filename="code.png"),
-                    caption=(
-                        f"🔑 Код привязки: `{code}`\n\n"
-                        "WhatsApp → *Связанные устройства* → *Привязать устройство* → "
-                        "*По номеру телефона* → введите код.\n\n"
-                        "Когда войдёте — отправьте любое сообщение ✅"
-                    ),
-                    parse_mode="Markdown"
-                )
-                await status_msg.delete()
-                screenshot_sent = True
-            except Exception as e:
-                log.warning(f"[CODE] Не удалось отправить скриншот: {e}")
-
-            if not screenshot_sent:
-                await status_msg.edit_text(
-                    f"🔑 Код привязки:\n\n`{code}`\n\n"
-                    "WhatsApp → *Связанные устройства* → *Привязать устройство* → "
-                    "*По номеру телефона* → введите код.\n\n"
-                    "Когда войдёте — отправьте любое сообщение ✅",
-                    parse_mode="Markdown"
-                )
-
-            _CONTEXTS[phone] = (context, page, pw)
-            asyncio.create_task(schedule_context_cleanup(phone))
-            await state.update_data(phone=phone)
-            await state.set_state(S.code)
-
+    if screenshot:
+        await status.delete()
+        await msg.answer_photo(
+            photo=BufferedInputFile(screenshot, filename="qr.png"),
+            caption="📷 Отсканируйте этот QR-код полным экраном.\n⏳ После сканирования у вас есть 2 минуты. Ожидаю..."
+        )
+        
+        # Ждем логина
+        success = await asyncio.to_thread(sync_wait_for_login, phone)
+        if success:
+            await db_save_account(phone, get_random_ua())
+            await msg.answer(f"✅ Успешный вход для {phone}! Аккаунт добавлен в ферму.")
         else:
-            await context.close()
-            await pw.stop()
-            await status_msg.edit_text("❌ Не удалось получить код. Попробуйте войти по QR.")
-            await state.clear()
-
-    except Exception as e:
-        log.error(f"Login error: {e}")
-        try:
-            await status_msg.edit_text(f"❌ Ошибка: {e}")
-        except Exception:
-            await msg.answer(f"❌ Ошибка: {e}")
-        await state.clear()
-
-# ── ПОДТВЕРЖДЕНИЕ КОДА ────────────────────────────────────
-
-@dp.message(S.code)
-async def handle_code_confirm(msg: types.Message, state: FSMContext):
-    data     = await state.get_data()
-    phone    = data.get("phone")
-    ctx_data = _CONTEXTS.get(phone)
-
-    status = await msg.answer("⏳ Проверяю вход...")
-
-    if ctx_data:
-        context, page, pw = ctx_data
-        if await wait_logged_in(page, 60):
-            await save_session(context, phone)
-            await context.close()
-            await pw.stop()
-            _CONTEXTS.pop(phone, None)
-            await status.edit_text("✅ Вход выполнен! Фарм запущен.")
-            _start_farm(phone)
-        else:
-            await context.close()
-            await pw.stop()
-            _CONTEXTS.pop(phone, None)
-            await status.edit_text("❌ Вход не подтверждён. Попробуйте /start")
+            await msg.answer("❌ Время ожидания вышло или ошибка авторизации.")
     else:
-        await status.edit_text("⚠️ Сессия потеряна (таймаут 5 минут). Начните снова /start")
-
+        await status.edit_text("❌ Не удалось получить QR-код. Проверьте логи.")
+    
     await state.clear()
 
-# ── START FARM ────────────────────────────────────────────
+# ==========================================
+# 🐝 HIVE MIND (ФАРМ ПРОЦЕССОР)
+# ==========================================
 
-def _start_farm(phone: str):
-    if phone not in FARM_TASKS or FARM_TASKS[phone].done():
-        FARM_TASKS[phone] = asyncio.create_task(farm_worker(phone))
-        log.info(f"[FARM] Задача создана: {phone}")
+async def farm_worker(phone: str):
+    """Обёртка для работы с Семафором (контроль ОЗУ)"""
+    async with BROWSER_LIMIT:
+        if is_memory_critical():
+            logger.warning("Пропуск цикла из-за ОЗУ.")
+            return
+            
+        logger.info(f"▶️ Запуск прогрева для {phone}")
+        success = await asyncio.to_thread(sync_farm_step, phone)
+        if success:
+            async with aiosqlite.connect(DB_NAME) as db:
+                await db.execute("UPDATE accounts SET last_active=? WHERE phone=?", (datetime.now().isoformat(), phone))
+                await db.commit()
 
-# ── MAIN ─────────────────────────────────────────────────
+async def hive_loop():
+    logger.info("🐝 HIVE MIND ЗАПУЩЕН")
+    while True:
+        try:
+            accs = await db_get_active_phones()
+            if not accs:
+                await asyncio.sleep(30)
+                continue
+            
+            # Рандомный выбор аккаунта, подходящего под текущий INSTANCE
+            valid_accs = [p for i, p in enumerate(accs) if (i % 1) == (INSTANCE_ID - 1)] # Пока 1 инстанс
+            if valid_accs:
+                target = random.choice(valid_accs)
+                asyncio.create_task(farm_worker(target))
+            
+            pause = random.randint(FARM_MIN, FARM_MAX)
+            logger.info(f"💤 Hive Mind спит {pause} сек...")
+            await asyncio.sleep(pause)
+            
+        except Exception as e:
+            logger.error(f"Hive Loop Error: {e}")
+            await asyncio.sleep(15)
+
+# ==========================================
+# 🚀 ЗАПУСК
+# ==========================================
 
 async def main():
-    global bot
     if not BOT_TOKEN:
-        log.critical("❌ BOT_TOKEN не задан! Бот не запустится должным образом.")
-        return
+        logger.critical("❌ НЕТ ТОКЕНА!")
+        sys.exit(1)
 
-    bot = Bot(token=BOT_TOKEN)
+    aggressive_cleanup()
     await db_init()
-
-    # Запускаем только те аккаунты, которые прописаны в базе как "active"
-    for phone in await db_all_active():
-        _start_farm(phone)
-        await asyncio.sleep(3)
-
-    log.info("⚡ Imperator v17.2 (Вацап бот В3) запущен")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    
+    # Запуск фонового прогрева
+    asyncio.create_task(hive_loop())
+    
+    logger.info("🚀 Imperator v26.0 (Warlord Edition) запущен!")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    uvloop.install()
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Выключение бота...")
+    finally:
+        aggressive_cleanup()
