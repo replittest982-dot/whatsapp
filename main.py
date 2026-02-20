@@ -1,12 +1,17 @@
 """
-⚡ IMPERATOR v17 — Playwright Edition (Вацап бот В3)
+⚡ IMPERATOR v17.2 — Playwright Edition (Вацап бот В3)
 - Пишет только сам себе.
 - Отправляет уведомление в Telegram, когда успешно зашел.
-- Максимально оптимизировано потребление памяти (браузеры закрываются на время сна).
-- v17.1: Отправляет скриншот QR-кода и кода привязки в Telegram.
+- Максимально оптимизировано потребление памяти (браузеры закрываются на время сна + Memory Guard).
+- v17.2: Скриншоты QR и кода привязки отправляются ПОЛНЫМ ЭКРАНОМ, а не обрезанными кусками.
 """
 
-import asyncio, os, logging, random, sys, re
+import asyncio
+import os
+import logging
+import random
+import sys
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -29,6 +34,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 ADMIN_ID     = int(os.environ.get("ADMIN_ID", 0))
+INSTANCE_ID  = int(os.environ.get("INSTANCE_ID", 1))
 GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")
 DB           = "imp17.db"
 SESS_DIR     = os.path.join(os.getcwd(), "sessions")
@@ -60,6 +66,17 @@ dp = Dispatcher(storage=MemoryStorage())
 _CONTEXTS: dict[str, tuple] = {}
 FARM_TASKS: dict[str, asyncio.Task] = {}
 _gemini_model = None
+
+# ── MEMORY GUARD ─────────────────────────────────────────
+
+def is_memory_critical() -> bool:
+    """Возвращает True, если свободной памяти меньше 200MB"""
+    mem = psutil.virtual_memory()
+    free_mb = mem.available / (1024 * 1024)
+    if free_mb < 200:
+        log.warning(f"⚠️ КРИТИЧЕСКИЙ УРОВЕНЬ ПАМЯТИ: Доступно {free_mb:.2f} MB")
+        return True
+    return False
 
 # ── GEMINI ───────────────────────────────────────────────
 
@@ -156,7 +173,6 @@ async def make_context(phone: str, playwright) -> tuple[BrowserContext, dict]:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            # ── ВАЖНО: убираем --disable-images, иначе QR не отрисуется! ──
             "--js-flags=--max-old-space-size=256",
         ]
     )
@@ -167,7 +183,7 @@ async def make_context(phone: str, playwright) -> tuple[BrowserContext, dict]:
         locale="ru-RU",
         timezone_id="Asia/Almaty",
         permissions=["geolocation"],
-        geolocation={"latitude": 43.238, "longitude": 76.889},
+        geolocation={"latitude": 43.2389, "longitude": 76.8897},
         storage_state=os.path.join(sess_path, "state.json") if os.path.exists(
             os.path.join(sess_path, "state.json")) else None,
         extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9"}
@@ -200,7 +216,8 @@ async def schedule_context_cleanup(phone: str, delay: int = 300):
 async def htype(page: Page, selector: str, text: str):
     await page.click(selector)
     for ch in text:
-        if random.random() < 0.03:
+        # Шанс 4% на ошибку и исправление (как просил в ТЗ)
+        if random.random() < 0.04:
             wrong = random.choice("фывапролдж")
             await page.keyboard.type(wrong, delay=random.randint(40, 150))
             await asyncio.sleep(random.uniform(0.2, 0.5))
@@ -274,6 +291,7 @@ async def enter_phone_and_get_code(page: Page, phone: str) -> str:
     except Exception:
         pass
 
+    # Ядерный метод JS (как в ТЗ)
     await page.evaluate(f"""
         var inp = document.querySelector('input[type="text"],input[inputmode="numeric"]');
         if(inp){{
@@ -335,65 +353,33 @@ def is_banned_html(html: str) -> bool:
     src = html.lower()
     return any(w in src for w in ["номер заблокирован", "is banned", "account is not allowed", "spam"])
 
-# ── SCREENSHOT HELPERS ────────────────────────────────────
+# ── SCREENSHOT HELPERS (ИСПРАВЛЕНО НА ПОЛНЫЙ ЭКРАН) ───────
 
 async def take_qr_screenshot(page: Page) -> bytes:
-    """
-    Пытается снять скриншот именно canvas с QR-кодом.
-    Если элемент не найден — делает скриншот всей страницы.
-    Перед скриншотом ждёт 5 секунд, чтобы QR успел отрисоваться.
-    """
+    """Делает скриншот ВСЕЙ страницы с QR-кодом."""
     await asyncio.sleep(5)  # ждём прогрузки QR
-
-    # Список возможных селекторов QR-canvas у WhatsApp Web
-    qr_selectors = [
-        "canvas[aria-label='Scan me!']",
-        "canvas[aria-label='Scan this QR code to link a device']",
-        "div[data-ref] canvas",
-        "div[class*='qr'] canvas",
-        "canvas",                        # последний резерв — любой canvas
-    ]
-
-    for selector in qr_selectors:
-        try:
-            el = await page.wait_for_selector(selector, timeout=3000)
-            if el:
-                log.info(f"[SCREENSHOT] QR найден по селектору: {selector}")
-                return await el.screenshot(type="png")
-        except Exception:
-            continue
-
-    # Ничего не нашли — полный скриншот страницы
-    log.warning("[SCREENSHOT] QR-элемент не найден, делаем скриншот всей страницы")
-    return await page.screenshot(type="png", full_page=False)
+    try:
+        # Просто ждём появления canvas на странице, чтобы убедиться, что он отрисован
+        await page.wait_for_selector("canvas", timeout=5000)
+    except Exception:
+        pass
+    
+    log.info("[SCREENSHOT] Делаем скриншот полной страницы для QR")
+    # full_page=True гарантирует, что скриншот не обрежется до размеров одного элемента
+    return await page.screenshot(type="png", full_page=True)
 
 
 async def take_code_screenshot(page: Page) -> bytes:
-    """
-    Пытается снять скриншот блока с кодом привязки.
-    Если элемент не найден — делает скриншот всей страницы.
-    Перед скриншотом ждёт 5 секунд, чтобы код успел отрисоваться.
-    """
+    """Делает скриншот ВСЕЙ страницы с кодом привязки."""
     await asyncio.sleep(5)  # ждём прогрузки кода
+    try:
+        # Ждём появления блока с кодом
+        await page.wait_for_selector("div[data-ref], div[class*='pairing']", timeout=5000)
+    except Exception:
+        pass
 
-    code_selectors = [
-        "div[class*='pairing-code']",
-        "div[data-ref]",
-        "div[class*='landing-main']",
-        "div[class*='pairing']",
-    ]
-
-    for selector in code_selectors:
-        try:
-            el = await page.wait_for_selector(selector, timeout=3000)
-            if el:
-                log.info(f"[SCREENSHOT] Блок кода найден по селектору: {selector}")
-                return await el.screenshot(type="png")
-        except Exception:
-            continue
-
-    log.warning("[SCREENSHOT] Блок кода не найден, делаем скриншот всей страницы")
-    return await page.screenshot(type="png", full_page=False)
+    log.info("[SCREENSHOT] Делаем скриншот полной страницы для кода")
+    return await page.screenshot(type="png", full_page=True)
 
 # ── FARM WORKER ───────────────────────────────────────────
 
@@ -403,6 +389,11 @@ async def farm_worker(phone: str):
     first_run = True
 
     while True:
+        # Memory Guard перед запуском браузера
+        while is_memory_critical():
+            log.warning("[FARM] Пауза воркера из-за нехватки памяти (ждем 30 сек)...")
+            await asyncio.sleep(30)
+
         try:
             async with async_playwright() as pw:
                 context, dev = await make_context(phone, pw)
@@ -471,7 +462,7 @@ async def cmd_start(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return await msg.answer("⛔ Нет доступа.")
     await msg.answer(
-        f"⚡ *Imperator v17 (Вацап бот В3)*\n"
+        f"⚡ *Imperator v17.2 (Вацап бот В3)*\n"
         f"Интервал работы: {FARM_MIN_MINUTES} - {FARM_MAX_MINUTES} минут.\n"
         f"Выберите действие:",
         parse_mode="Markdown",
@@ -490,7 +481,7 @@ async def cb_accounts(cb: types.CallbackQuery):
 
 @dp.callback_query(F.data == "login_qr")
 async def cb_qr(cb: types.CallbackQuery, state: FSMContext):
-    await cb.message.answer("📷 Введите номер телефона (для папки сессии):")
+    await cb.message.answer("📷 Введите номер телефона (для привязки папки сессии):")
     await state.set_state(S.phone)
     await state.update_data(mode="qr")
     await cb.answer()
@@ -502,13 +493,18 @@ async def cb_phone(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(mode="phone")
     await cb.answer()
 
-# ── ГЛАВНЫЙ ОБРАБОТЧИК (переписан) ───────────────────────
+# ── ГЛАВНЫЙ ОБРАБОТЧИК ───────────────────────────────────
 
 @dp.message(S.phone)
 async def handle_phone(msg: types.Message, state: FSMContext):
     data  = await state.get_data()
     phone = msg.text.strip().replace("+", "")
     mode  = data.get("mode", "phone")
+
+    if is_memory_critical():
+        await msg.answer("⚠️ Сервер перегружен (нет свободной ОЗУ). Попробуйте позже.")
+        await state.clear()
+        return
 
     status_msg = await msg.answer("⏳ Запускаю браузер...")
 
@@ -534,7 +530,6 @@ async def handle_phone(msg: types.Message, state: FSMContext):
         if mode == "qr":
             await status_msg.edit_text("⏳ Ожидаю появления QR-кода...")
 
-            # Делаем скриншот QR (внутри функции уже есть asyncio.sleep(5))
             try:
                 screenshot_bytes = await take_qr_screenshot(page)
                 await msg.answer_photo(
@@ -577,7 +572,6 @@ async def handle_phone(msg: types.Message, state: FSMContext):
             code = await get_pairing_code(page)
 
         if code:
-            # Делаем скриншот страницы с кодом (внутри функции уже есть asyncio.sleep(5))
             screenshot_sent = False
             try:
                 screenshot_bytes = await take_code_screenshot(page)
@@ -596,7 +590,6 @@ async def handle_phone(msg: types.Message, state: FSMContext):
             except Exception as e:
                 log.warning(f"[CODE] Не удалось отправить скриншот: {e}")
 
-            # Фоллбэк — просто текст, если скриншот не отправился
             if not screenshot_sent:
                 await status_msg.edit_text(
                     f"🔑 Код привязки:\n\n`{code}`\n\n"
@@ -672,11 +665,12 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     await db_init()
 
+    # Запускаем только те аккаунты, которые прописаны в базе как "active"
     for phone in await db_all_active():
         _start_farm(phone)
         await asyncio.sleep(3)
 
-    log.info("⚡ Imperator v17.1 (Вацап бот В3) запущен")
+    log.info("⚡ Imperator v17.2 (Вацап бот В3) запущен")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
