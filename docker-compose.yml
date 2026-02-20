@@ -1,41 +1,20 @@
-version: '3.8'
+vversion: '3.8'
+
 services:
-  imperator:
+  imperator_v17:
     build: .
     container_name: imperator_v17
     restart: unless-stopped
-
-    environment:
-      - BOT_TOKEN=${BOT_TOKEN}
-      - ADMIN_ID=${ADMIN_ID}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-      - FARM_MIN_MINUTES=5
-      - FARM_MAX_MINUTES=15
-
+    # Подгружаем токены из твоего файла .env
+    env_file:
+      - .env
+    # Пробрасываем файлы наружу, чтобы они сохранялись на диске сервера
     volumes:
       - ./sessions:/app/sessions
       - ./imp17.db:/app/imp17.db
-      - playwright-cache:/ms-playwright
-
-    shm_size: '1gb'
-
-    deploy:
-      resources:
-        limits:
-          memory: 4000M
-          cpus: '4'
-        reservations:
-          memory: 512M
-          cpus: '0.5'
-
-    healthcheck:
-      test: ["CMD", "python", "-c", "import aiosqlite; print('ok')"]
-      interval: 60s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-
-volumes:
-  playwright-cache:
-    driver: local
+    # Ограничение логов, чтобы не забить диск сервера в Актобе
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
