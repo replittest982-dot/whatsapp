@@ -3,6 +3,7 @@
 - Пишет только сам себе.
 - Отправляет уведомление в Telegram, когда успешно зашел.
 - Максимально оптимизировано потребление памяти (браузеры закрываются на время сна).
+- v17.1: Отправляет скриншот QR-кода и кода привязки в Telegram.
 """
 
 import asyncio, os, logging, random, sys, re
@@ -19,7 +20,7 @@ import google.generativeai as genai
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -34,8 +35,8 @@ SESS_DIR     = os.path.join(os.getcwd(), "sessions")
 os.makedirs(SESS_DIR, exist_ok=True)
 
 # НАСТРОЙКА ВРЕМЕНИ (В МИНУТАХ)
-FARM_MIN_MINUTES = int(os.environ.get("FARM_MIN_MINUTES", 5))  
-FARM_MAX_MINUTES = int(os.environ.get("FARM_MAX_MINUTES", 15)) 
+FARM_MIN_MINUTES = int(os.environ.get("FARM_MIN_MINUTES", 5))
+FARM_MAX_MINUTES = int(os.environ.get("FARM_MAX_MINUTES", 15))
 
 FARM_MIN = FARM_MIN_MINUTES * 60
 FARM_MAX = FARM_MAX_MINUTES * 60
@@ -88,7 +89,6 @@ async def gen_message() -> str:
         except Exception as e:
             log.warning(f"Gemini error: {e}")
 
-    # Фоллбэк — случайные фразы
     fallbacks = [
         "не забыть купить продукты",
         "позвонить завтра утром",
@@ -156,7 +156,7 @@ async def make_context(phone: str, playwright) -> tuple[BrowserContext, dict]:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-images",
+            # ── ВАЖНО: убираем --disable-images, иначе QR не отрисуется! ──
             "--js-flags=--max-old-space-size=256",
         ]
     )
@@ -227,15 +227,16 @@ async def wait_logged_in(page: Page, timeout=120) -> bool:
 async def get_pairing_code(page: Page) -> str:
     try:
         await asyncio.sleep(3)
-        # Улучшенные селекторы для парсинга кода
-        spans = await page.query_selector_all("div[data-ref] span, div[class*='pairing'] span, div[role='button'] span")
+        spans = await page.query_selector_all(
+            "div[data-ref] span, div[class*='pairing'] span, div[role='button'] span"
+        )
         parts = []
         for s in spans:
             t = (await s.text_content() or "").strip()
             if t and len(t) <= 4 and (t.isalnum() or t.isdigit()):
                 parts.append(t)
         code = "".join(parts)[:8]
-        if len(code) >= 4 and len(code) <= 8:
+        if len(code) >= 4:
             return code
         return await ocr_code(page)
     except Exception as e:
@@ -249,8 +250,10 @@ async def ocr_code(page: Page) -> str:
         import io
         screenshot = await page.screenshot(type="png")
         img = Image.open(io.BytesIO(screenshot))
-        # Улучшенный OCR конфиг для символов кода
-        text = pytesseract.image_to_string(img, config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-")
+        text = pytesseract.image_to_string(
+            img,
+            config="--psm 6 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+        )
         match = re.search(r'[A-Z0-9]{4}[-\s]?[A-Z0-9]{4}', text.upper())
         if match:
             return match.group().replace("-", "").replace(" ", "")
@@ -332,6 +335,66 @@ def is_banned_html(html: str) -> bool:
     src = html.lower()
     return any(w in src for w in ["номер заблокирован", "is banned", "account is not allowed", "spam"])
 
+# ── SCREENSHOT HELPERS ────────────────────────────────────
+
+async def take_qr_screenshot(page: Page) -> bytes:
+    """
+    Пытается снять скриншот именно canvas с QR-кодом.
+    Если элемент не найден — делает скриншот всей страницы.
+    Перед скриншотом ждёт 5 секунд, чтобы QR успел отрисоваться.
+    """
+    await asyncio.sleep(5)  # ждём прогрузки QR
+
+    # Список возможных селекторов QR-canvas у WhatsApp Web
+    qr_selectors = [
+        "canvas[aria-label='Scan me!']",
+        "canvas[aria-label='Scan this QR code to link a device']",
+        "div[data-ref] canvas",
+        "div[class*='qr'] canvas",
+        "canvas",                        # последний резерв — любой canvas
+    ]
+
+    for selector in qr_selectors:
+        try:
+            el = await page.wait_for_selector(selector, timeout=3000)
+            if el:
+                log.info(f"[SCREENSHOT] QR найден по селектору: {selector}")
+                return await el.screenshot(type="png")
+        except Exception:
+            continue
+
+    # Ничего не нашли — полный скриншот страницы
+    log.warning("[SCREENSHOT] QR-элемент не найден, делаем скриншот всей страницы")
+    return await page.screenshot(type="png", full_page=False)
+
+
+async def take_code_screenshot(page: Page) -> bytes:
+    """
+    Пытается снять скриншот блока с кодом привязки.
+    Если элемент не найден — делает скриншот всей страницы.
+    Перед скриншотом ждёт 5 секунд, чтобы код успел отрисоваться.
+    """
+    await asyncio.sleep(5)  # ждём прогрузки кода
+
+    code_selectors = [
+        "div[class*='pairing-code']",
+        "div[data-ref]",
+        "div[class*='landing-main']",
+        "div[class*='pairing']",
+    ]
+
+    for selector in code_selectors:
+        try:
+            el = await page.wait_for_selector(selector, timeout=3000)
+            if el:
+                log.info(f"[SCREENSHOT] Блок кода найден по селектору: {selector}")
+                return await el.screenshot(type="png")
+        except Exception:
+            continue
+
+    log.warning("[SCREENSHOT] Блок кода не найден, делаем скриншот всей страницы")
+    return await page.screenshot(type="png", full_page=False)
+
 # ── FARM WORKER ───────────────────────────────────────────
 
 async def farm_worker(phone: str):
@@ -341,7 +404,6 @@ async def farm_worker(phone: str):
 
     while True:
         try:
-            # Браузер запускается только на время работы, затем полностью выгружается
             async with async_playwright() as pw:
                 context, dev = await make_context(phone, pw)
                 page = await context.new_page()
@@ -358,7 +420,12 @@ async def farm_worker(phone: str):
 
                 if first_run:
                     if bot:
-                        await bot.send_message(ADMIN_ID, f"🟢 WhatsApp [{phone}] успешно в сети!\nИнтервал: {FARM_MIN_MINUTES}-{FARM_MAX_MINUTES} мин.\nРежим: Пишу сам себе.")
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"🟢 WhatsApp [{phone}] успешно в сети!\n"
+                            f"Интервал: {FARM_MIN_MINUTES}-{FARM_MAX_MINUTES} мин.\n"
+                            f"Режим: Пишу сам себе."
+                        )
                     first_run = False
 
                 html = await page.content()
@@ -376,13 +443,12 @@ async def farm_worker(phone: str):
                 await send_to_self(page, phone)
                 await save_session(context, phone)
                 await db_touch(phone)
-                
+
                 await context.close()
 
         except Exception as e:
             log.error(f"[FARM] {phone} ошибка: {e}")
 
-        # Сон происходит ВНЕ контекста Playwright! Оперативная память полностью свободна.
         pause = random.randint(FARM_MIN, FARM_MAX)
         log.info(f"[FARM] {phone} — следующий запуск через {pause//60} мин")
         await asyncio.sleep(pause)
@@ -404,8 +470,13 @@ def main_kb():
 async def cmd_start(msg: types.Message):
     if msg.from_user.id != ADMIN_ID:
         return await msg.answer("⛔ Нет доступа.")
-    await msg.answer(f"⚡ *Imperator v17 (Вацап бот В3)*\nИнтервал работы: {FARM_MIN_MINUTES} - {FARM_MAX_MINUTES} минут.\nВыберите действие:",
-                     parse_mode="Markdown", reply_markup=main_kb())
+    await msg.answer(
+        f"⚡ *Imperator v17 (Вацап бот В3)*\n"
+        f"Интервал работы: {FARM_MIN_MINUTES} - {FARM_MAX_MINUTES} минут.\n"
+        f"Выберите действие:",
+        parse_mode="Markdown",
+        reply_markup=main_kb()
+    )
 
 @dp.callback_query(F.data == "accounts")
 async def cb_accounts(cb: types.CallbackQuery):
@@ -431,6 +502,8 @@ async def cb_phone(cb: types.CallbackQuery, state: FSMContext):
     await state.update_data(mode="phone")
     await cb.answer()
 
+# ── ГЛАВНЫЙ ОБРАБОТЧИК (переписан) ───────────────────────
+
 @dp.message(S.phone)
 async def handle_phone(msg: types.Message, state: FSMContext):
     data  = await state.get_data()
@@ -447,6 +520,7 @@ async def handle_phone(msg: types.Message, state: FSMContext):
         await page.goto("https://web.whatsapp.com", wait_until="domcontentloaded")
         await asyncio.sleep(3)
 
+        # ── Уже залогинен — просто запускаем фарм ────────
         if await is_logged_in(page):
             await save_session(context, phone)
             await context.close()
@@ -456,26 +530,46 @@ async def handle_phone(msg: types.Message, state: FSMContext):
             await state.clear()
             return
 
+        # ── Режим QR ──────────────────────────────────────
         if mode == "qr":
-            await status_msg.edit_text(
-                "📷 Откройте WhatsApp → *Связанные устройства* → *Привязать устройство*\n"
-                "Отсканируйте QR-код.\n\n⏳ Ожидаю входа (до 2 мин)...",
-                parse_mode="Markdown"
-            )
+            await status_msg.edit_text("⏳ Ожидаю появления QR-кода...")
+
+            # Делаем скриншот QR (внутри функции уже есть asyncio.sleep(5))
+            try:
+                screenshot_bytes = await take_qr_screenshot(page)
+                await msg.answer_photo(
+                    photo=BufferedInputFile(screenshot_bytes, filename="qr.png"),
+                    caption=(
+                        "📷 Откройте WhatsApp → *Связанные устройства* → *Привязать устройство*\n"
+                        "Отсканируйте QR-код выше.\n\n"
+                        "⏳ Ожидаю подтверждения входа (до 2 мин)..."
+                    ),
+                    parse_mode="Markdown"
+                )
+                await status_msg.delete()
+            except Exception as e:
+                log.warning(f"[QR] Не удалось отправить скриншот: {e}")
+                await status_msg.edit_text(
+                    "📷 Откройте WhatsApp → *Связанные устройства* → *Привязать устройство*\n"
+                    "Отсканируйте QR-код.\n\n⏳ Ожидаю входа (до 2 мин)...",
+                    parse_mode="Markdown"
+                )
+
             if await wait_logged_in(page, 120):
                 await save_session(context, phone)
                 await context.close()
                 await pw.stop()
-                await status_msg.edit_text("✅ Вход по QR! Фарм запущен.")
+                await msg.answer("✅ Вход по QR выполнен! Фарм запущен.")
                 _start_farm(phone)
             else:
                 await context.close()
                 await pw.stop()
-                await status_msg.edit_text("❌ Timeout. Попробуйте снова /start")
+                await msg.answer("❌ Timeout. QR устарел, попробуйте снова /start")
             await state.clear()
             return
 
-        await status_msg.edit_text("⏳ Получаю код привязки...")
+        # ── Режим Phone (код привязки) ────────────────────
+        await status_msg.edit_text("⏳ Запрашиваю код привязки...")
         code = await enter_phone_and_get_code(page, phone)
 
         if not code:
@@ -483,32 +577,60 @@ async def handle_phone(msg: types.Message, state: FSMContext):
             code = await get_pairing_code(page)
 
         if code:
+            # Делаем скриншот страницы с кодом (внутри функции уже есть asyncio.sleep(5))
+            screenshot_sent = False
+            try:
+                screenshot_bytes = await take_code_screenshot(page)
+                await msg.answer_photo(
+                    photo=BufferedInputFile(screenshot_bytes, filename="code.png"),
+                    caption=(
+                        f"🔑 Код привязки: `{code}`\n\n"
+                        "WhatsApp → *Связанные устройства* → *Привязать устройство* → "
+                        "*По номеру телефона* → введите код.\n\n"
+                        "Когда войдёте — отправьте любое сообщение ✅"
+                    ),
+                    parse_mode="Markdown"
+                )
+                await status_msg.delete()
+                screenshot_sent = True
+            except Exception as e:
+                log.warning(f"[CODE] Не удалось отправить скриншот: {e}")
+
+            # Фоллбэк — просто текст, если скриншот не отправился
+            if not screenshot_sent:
+                await status_msg.edit_text(
+                    f"🔑 Код привязки:\n\n`{code}`\n\n"
+                    "WhatsApp → *Связанные устройства* → *Привязать устройство* → "
+                    "*По номеру телефона* → введите код.\n\n"
+                    "Когда войдёте — отправьте любое сообщение ✅",
+                    parse_mode="Markdown"
+                )
+
             _CONTEXTS[phone] = (context, page, pw)
-            asyncio.create_task(schedule_context_cleanup(phone)) # Запуск чистильщика
+            asyncio.create_task(schedule_context_cleanup(phone))
             await state.update_data(phone=phone)
-            await status_msg.edit_text(
-                f"🔑 Код привязки:\n\n`{code}`\n\n"
-                "WhatsApp → *Связанные устройства* → *Привязать устройство* → "
-                "*По номеру телефона* → введите код.\n\n"
-                "Когда войдёте — отправьте любое сообщение ✅",
-                parse_mode="Markdown"
-            )
             await state.set_state(S.code)
+
         else:
             await context.close()
             await pw.stop()
-            await status_msg.edit_text("❌ Не удалось получить код. Попробуйте QR.")
+            await status_msg.edit_text("❌ Не удалось получить код. Попробуйте войти по QR.")
             await state.clear()
 
     except Exception as e:
         log.error(f"Login error: {e}")
-        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        try:
+            await status_msg.edit_text(f"❌ Ошибка: {e}")
+        except Exception:
+            await msg.answer(f"❌ Ошибка: {e}")
         await state.clear()
+
+# ── ПОДТВЕРЖДЕНИЕ КОДА ────────────────────────────────────
 
 @dp.message(S.code)
 async def handle_code_confirm(msg: types.Message, state: FSMContext):
-    data  = await state.get_data()
-    phone = data.get("phone")
+    data     = await state.get_data()
+    phone    = data.get("phone")
     ctx_data = _CONTEXTS.get(phone)
 
     status = await msg.answer("⏳ Проверяю вход...")
@@ -532,6 +654,8 @@ async def handle_code_confirm(msg: types.Message, state: FSMContext):
 
     await state.clear()
 
+# ── START FARM ────────────────────────────────────────────
+
 def _start_farm(phone: str):
     if phone not in FARM_TASKS or FARM_TASKS[phone].done():
         FARM_TASKS[phone] = asyncio.create_task(farm_worker(phone))
@@ -548,12 +672,11 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     await db_init()
 
-    # Восстанавливаем фарм для всех активных аккаунтов
     for phone in await db_all_active():
         _start_farm(phone)
         await asyncio.sleep(3)
 
-    log.info("⚡ Imperator v17 (Вацап бот В3) запущен")
+    log.info("⚡ Imperator v17.1 (Вацап бот В3) запущен")
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 if __name__ == "__main__":
