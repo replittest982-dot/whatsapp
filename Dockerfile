@@ -1,43 +1,28 @@
-FROM python:3.10-slim
+# Используем официальный образ Playwright, в котором уже есть все браузеры
+FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
 
+WORKDIR /app
+
+# Устанавливаем Tesseract OCR и дополнительные библиотеки для работы с фото и видео
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-rus \
-    libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libdbus-1-3 \
-    libxcb1 \
-    libxkbcommon0 \
-    libx11-6 \
-    libxcomposite1 \
-    libxdamage1 \
+    ffmpeg \
+    libsm6 \
     libxext6 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libasound2 \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Копируем зависимости
 COPY requirements.txt .
-
 RUN pip install --no-cache-dir -r requirements.txt
 
-ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install chromium
-RUN playwright install-deps chromium
-
+# Копируем весь код бота
 COPY . .
 
-# [FIX]: Создаем файл БД заранее, чтобы volume в docker-compose монтировался корректно
-RUN touch /app/imp17.db
+# Создаем папку сессий и файл базы данных заранее, даем права (fix для Aeza/Linux)
+RUN mkdir -p sessions && \
+    touch imp17.db && \
+    chmod -R 777 /app
 
+# Команда запуска
 CMD ["python", "main.py"]
