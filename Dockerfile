@@ -1,6 +1,6 @@
-cat > /mnt/user-data/outputs/Dockerfile << 'EOF'
 FROM python:3.11-slim
 
+# Установка системных зависимостей для Google Chrome
 RUN apt-get update && apt-get install -y \
     wget ca-certificates \
     libglib2.0-0 libnss3 libfontconfig1 \
@@ -11,25 +11,22 @@ RUN apt-get update && apt-get install -y \
     libgbm1 libasound2 --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Только Chrome, ChromeDriver скачает webdriver-manager сам
+# Скачиваем и устанавливаем оригинальный Google Chrome
 RUN wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
     && apt-get update && apt-get install -y /tmp/chrome.deb \
-    && rm /tmp/chrome.deb \
-    && google-chrome --version
+    && rm /tmp/chrome.deb
 
 WORKDIR /app
+
+# Создаем директорию под сессии WhatsApp
 RUN mkdir -p /app/sessions
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY wa_final_bot.py .
+COPY main.py .
 
-ENV BOT_TOKEN=""
-ENV ADMIN_ID=""
 ENV PYTHONUNBUFFERED=1
 ENV WDM_LOG=0
 
-CMD ["python", "wa_final_bot.py"]
-EOF
-echo "Done"
+CMD ["python", "main.py"]
